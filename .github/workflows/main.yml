@@ -23,7 +23,16 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ccxt requests pandas
+          pip install ccxt requests pandas python-telegram-bot pytz
+
+      - name: Download Python time script
+        run: curl -o time_check.py ${{ secrets.TIME }}
+
+      - name: Run Telegram message script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python time_check.py
 
       - name: Download Python script
         run: curl -o rotify.py ${{ secrets.CHECKER }}
