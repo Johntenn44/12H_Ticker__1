@@ -10,6 +10,10 @@ COINS = [
     "XRP/USDT",  # Kraken uses XBT for Bitcoin
     "XMR/USDT",
     "DOGE/USDT",
+    "VIRTUAL/USDT",
+    "DOT/USDT",
+    "SUI/USDT",
+    "XLM/USDT",
     "MNT/USDT",
     "LTC/USDT",
     "NEAR/USDT",
