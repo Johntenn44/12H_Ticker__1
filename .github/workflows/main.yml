@@ -24,10 +24,10 @@ jobs:
           pip install ccxt requests pandas
 
       - name: Download Python script
-        run: curl -o r_notify.py ${{ secrets.CHECKER }}
+        run: curl -o python binance_ma_crossover_notify.py ${{ secrets.CHECKER }}
 
       - name: Verify script download
-        run: head -n 10 r_notify.py
+        run: head -n 10 python binance_ma_crossover_notify.py
 
       - name: Print current UTC time
         run: date -u
@@ -36,4 +36,4 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: r_notify.py
+        run: python binance_ma_crossover_notify.py
