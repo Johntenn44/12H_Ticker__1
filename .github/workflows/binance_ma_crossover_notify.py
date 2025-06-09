@@ -9,10 +9,17 @@ from datetime import datetime
 COINS = [
     "XRP/USDT",  # Kraken uses XBT for Bitcoin
     "XMR/USDT",
+    "WAVES/USDT",
+    "PLUME/USDT",
+    "SUSHI/USDT",
     "DOGE/USDT",
     "VIRTUAL/USDT",
-    "DOT/USDT",
+    "CAKE/USDT",
+    "GRASS/USDT",
+    "AAVE/USDT",
+    "XMR/USDT",
     "SUI/USDT",
+    "ARB/USDT",
     "XLM/USDT",
     "MNT/USDT",
     "LTC/USDT",
