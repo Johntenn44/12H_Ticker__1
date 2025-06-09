@@ -1,4 +1,4 @@
-name: Kraken Trend Alert
+name: Kraken 12H Trend Alert
 
 on:
   schedule:
