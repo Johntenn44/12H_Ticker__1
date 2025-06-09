@@ -133,7 +133,7 @@ def main():
             if any(k in trend for k in ['start', 'continue', 'warn', 'end']):
                 vals = trend['values']
                 msg = (
-                    f"<b>Kraken Trend Alert ({dt})</b>\n"
+                    f"<b>Kraken 12H Trend Alert ({dt})</b>\n"
                     f"<b>Symbol:</b> <code>{symbol}</code>\n"
                 )
                 if 'start' in trend:
