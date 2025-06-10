@@ -157,9 +157,9 @@ def main():
                 if 'end' in trend:
                     msg += f"End: <b>{trend['end']}</b>\n"
                 msg += (
-                    f"\n<code>cp={vals['cp']:.2f}, EMA8={vals['EMA8']:.2f}, EMA13={vals['EMA13']:.2f}, "
-                    f"EMA21={vals['EMA21']:.2f}, EMA50={vals['EMA50']:.2f}, EMA200={vals['EMA200']:.2f}, "
-                    f"MA50={vals['MA50']:.2f}, MA200={vals['MA200']:.2f}</code>"
+                    f"\n<code>cp={vals['cp']:.5f}, EMA8={vals['EMA8']:.5f}, EMA13={vals['EMA13']:.5f}, "
+                    f"EMA21={vals['EMA21']:.5f}, EMA50={vals['EMA50']:.5f}, EMA200={vals['EMA200']:.5f}, "
+                    f"MA50={vals['MA50']:.5f}, MA200={vals['MA200']:.5f}</code>"
                 )
                 messages.append(msg)
         except Exception as e:
