@@ -7,7 +7,7 @@ from datetime import datetime
 # --- CONFIGURATION ---
 
 COINS = [
-    "XRP/USDT",  # Kraken uses XBT for Bitcoin
+    "XRP/USDT",
     "XMR/USDT",
     "GMX/USDT",
     "LUNA/USDT",
@@ -22,18 +22,17 @@ COINS = [
     "CAKE/USDT",
     "GRASS/USDT",
     "AAVE/USDT",
-    "XMR/USDT",
     "SUI/USDT",
     "ARB/USDT",
     "XLM/USDT",
     "MNT/USDT",
     "LTC/USDT",
     "NEAR/USDT",
-    # Add more Kraken symbols here
+    # Add more symbols here
 ]
 
 EXCHANGE_ID = 'kucoin'
-INTERVAL = '12h'      # <-- Changed from '1d' to '6h'
+INTERVAL = '12h'      # Use 6-hour candles (change to '4h' if you want 4-hour candles)
 LOOKBACK = 210       # Number of candles to fetch (must be >= 200)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -54,51 +53,37 @@ def add_indicators(df):
 
 def analyze_trend(df):
     results = {}
-    cp = df['close'].iloc[-1]
-    A = df['EMA8'].iloc[-1]
-    B = df['EMA13'].iloc[-1]
-    C = df['EMA21'].iloc[-1]
-    D = df['EMA50'].iloc[-1]
-    E = df['EMA200'].iloc[-1]
-    MA50 = df['MA50'].iloc[-1]
-    MA200 = df['MA200'].iloc[-1]
+    # Use last two closes for trend analysis
+    cp1 = df['close'].iloc[-1]   # Most recent close
+    cp2 = df['close'].iloc[-2]   # Previous close
 
-    # --- Start Conditions ---
-    if (E > cp > A > B > C > D > MA50) and (cp < MA200):
+    A1 = df['EMA8'].iloc[-1]
+    B1 = df['EMA13'].iloc[-1]
+    C1 = df['EMA21'].iloc[-1]
+    D1 = df['EMA50'].iloc[-1]
+    E1 = df['EMA200'].iloc[-1]
+    MA50_1 = df['MA50'].iloc[-1]
+    MA200_1 = df['MA200'].iloc[-1]
+
+    A2 = df['EMA8'].iloc[-2]
+    B2 = df['EMA13'].iloc[-2]
+    C2 = df['EMA21'].iloc[-2]
+    D2 = df['EMA50'].iloc[-2]
+    E2 = df['EMA200'].iloc[-2]
+    MA50_2 = df['MA50'].iloc[-2]
+    MA200_2 = df['MA200'].iloc[-2]
+
+    # --- Start Conditions: both last closes must meet the trend condition ---
+    if (E1 > cp1 > A1 > B1 > C1 > D1 > MA50_1) and (cp1 < MA200_1) and \
+       (E2 > cp2 > A2 > B2 > C2 > D2 > MA50_2) and (cp2 < MA200_2):
         results['start'] = 'uptrend'
-    elif (E < cp < A < B < C < D < MA50) and (cp > MA200):
+    elif (E1 < cp1 < A1 < B1 < C1 < D1 < MA50_1) and (cp1 > MA200_1) and \
+         (E2 < cp2 < A2 < B2 < C2 < D2 < MA50_2) and (cp2 > MA200_2):
         results['start'] = 'downtrend'
 
-    # --- Continue Conditions ---
-    if results.get('start') == 'uptrend':
-        if abs(cp - E) < 1e-8 and abs(cp - MA200) > 1e-8:
-            results['continue'] = 'up_a'
-        elif abs(cp - MA200) < 1e-8 and abs(cp - E) > 1e-8:
-            results['continue'] = 'up_b'
-    elif results.get('start') == 'downtrend':
-        if abs(cp - E) < 1e-8 and abs(cp - MA200) > 1e-8:
-            results['continue'] = 'down_a'
-        elif abs(cp - MA200) < 1e-8 and abs(cp - E) > 1e-8:
-            results['continue'] = 'down_b'
-
-    # --- Reversal/Reset Conditions ---
-    if results.get('start') == 'uptrend':
-        if (cp < min(A, B, C, D)) or not (A > B > C > D) or abs(cp - MA50) < 1e-8:
-            results['warn'] = 'uptrend reversal/reset'
-    elif results.get('start') == 'downtrend':
-        if (cp > max(A, B, C, D)) or not (A < B < C < D) or abs(cp - MA50) < 1e-8:
-            results['warn'] = 'downtrend reversal/reset'
-
-    # --- End Conditions ---
-    if cp >= MA200 >= E:
-        results['end'] = 'uptrend end'
-    elif cp <= MA200 <= E:
-        results['end'] = 'downtrend end'
-
-    # --- Save values for reporting ---
     results['values'] = {
-        'cp': cp, 'EMA8': A, 'EMA13': B, 'EMA21': C, 'EMA50': D, 'EMA200': E,
-        'MA50': MA50, 'MA200': MA200
+        'cp1': cp1, 'cp2': cp2, 'EMA8': A1, 'EMA13': B1, 'EMA21': C1,
+        'EMA50': D1, 'EMA200': E1, 'MA50': MA50_1, 'MA200': MA200_1
     }
     return results
 
@@ -142,22 +127,13 @@ def main():
             df = add_indicators(df)
             trend = analyze_trend(df)
             # Format message if any condition is met
-            if any(k in trend for k in ['start', 'continue', 'warn', 'end']):
+            if 'start' in trend:
                 vals = trend['values']
                 msg = (
-                    f"<b>Kraken 12H Trend Alert ({dt})</b>\n"
+                    f"<b>Kucoin {INTERVAL.upper()} Trend Alert ({dt})</b>\n"
                     f"<b>Symbol:</b> <code>{symbol}</code>\n"
-                )
-                if 'start' in trend:
-                    msg += f"Start: <b>{trend['start']}</b>\n"
-                if 'continue' in trend:
-                    msg += f"Continue: <b>{trend['continue']}</b>\n"
-                if 'warn' in trend:
-                    msg += f"⚠️ <b>Warning:</b> {trend['warn']}\n"
-                if 'end' in trend:
-                    msg += f"End: <b>{trend['end']}</b>\n"
-                msg += (
-                    f"\n<code>cp={vals['cp']:.5f}, EMA8={vals['EMA8']:.5f}, EMA13={vals['EMA13']:.5f}, "
+                    f"Start: <b>{trend['start']}</b>\n"
+                    f"\n<code>cp1={vals['cp1']:.5f}, cp2={vals['cp2']:.5f}, EMA8={vals['EMA8']:.5f}, EMA13={vals['EMA13']:.5f}, "
                     f"EMA21={vals['EMA21']:.5f}, EMA50={vals['EMA50']:.5f}, EMA200={vals['EMA200']:.5f}, "
                     f"MA50={vals['MA50']:.5f}, MA200={vals['MA200']:.5f}</code>"
                 )
@@ -169,7 +145,8 @@ def main():
         for msg in messages:
             send_telegram_message(msg)
     else:
-        print("No trend signals for any coin.")
+        # Send "No trend signals for any coin" if there are no signals
+        send_telegram_message("No trend signals for any coin.")
 
 if __name__ == "__main__":
     main()
