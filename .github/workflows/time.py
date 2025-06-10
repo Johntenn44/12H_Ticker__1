@@ -17,8 +17,8 @@ async def main():
     current_hour = now.hour
     print(f"Current hour: {current_hour}")
 
-    if 0 <= current_hour < 9:
-        message = f"It's between 12AM and 9AM, Good morning! ☀️ Have a great day!"
+    if 0 <= current_hour < 5:
+        message = f"It's between 12AM and 5AM, Good morning! ☀️ Have a great day!"
     elif 18 <= current_hour < 24:
         message = "It's between 6PM and 12AM, Good night! 🌙 Sleep well!"
     else:
