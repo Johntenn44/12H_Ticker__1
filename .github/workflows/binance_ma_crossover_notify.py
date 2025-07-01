@@ -11,12 +11,12 @@ import traceback
 EXCHANGE_ID = 'kraken'
 SYMBOL = 'EUR/USD'
 INTERVAL = '15m'
-FETCH_DAYS = 50          # Fetch more than 30 days to compensate for filtered days
-HOLD_CANDLES = 3         # Hold position for 3 candles (45 minutes)
+FETCH_DAYS = 50
+HOLD_CANDLES = 3
 
 STARTING_UNITS = 10000
-PROFIT_UNIT_INCREASE = 9
-LOSS_UNIT_DECREASE = 5
+PROFIT_UNIT_INCREASE = 4  # Add 4 units on profit
+LOSS_UNIT_DECREASE = 5    # Subtract 5 units on loss
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -206,7 +206,7 @@ if __name__ == "__main__":
     INTERVAL = '15m'
     FETCH_DAYS = 50
     HOLD_CANDLES = 3
-    PROFIT_UNIT_INCREASE = 9
-    LOSS_UNIT_DECREASE = 5
+    PROFIT_UNIT_INCREASE = 4  # Updated here
+    LOSS_UNIT_DECREASE = 5    # Updated here
     STARTING_UNITS = 10000
     main()
