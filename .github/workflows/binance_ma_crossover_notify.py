@@ -11,7 +11,7 @@ import traceback
 EXCHANGE_ID = 'kraken'
 SYMBOL = 'EUR/USD'
 INTERVAL = '15m'
-LOOKBACK = 672  # 2 days
+LOOKBACK = 672  # 7 days (96 candles per day * 7)
 
 STARTING_UNITS = 10000
 PROFIT_UNIT_INCREASE = 9
@@ -81,7 +81,7 @@ def backtest(df):
                 units -= LOSS_UNIT_DECREASE
             position = None
 
-    # Close any open position at last price (considered loss or profit)
+    # Close any open position at last price (considered profit or loss)
     if position is not None:
         trade_pnl = df['close'].iloc[-1] - position['entry_price']
         if trade_pnl > 0:
@@ -150,5 +150,5 @@ def main():
 if __name__ == "__main__":
     SYMBOL = 'EUR/USD'
     INTERVAL = '15m'
-    LOOKBACK = 192  # 2 days
+    LOOKBACK = 672  # 7 days
     main()
