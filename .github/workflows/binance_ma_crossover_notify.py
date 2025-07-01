@@ -3,7 +3,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
 
 # --- TELEGRAM CONFIGURATION ---
@@ -27,20 +27,38 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"Failed to send Telegram message: {e}")
 
-# --- FETCH OHLCV DATA FROM KRAKEN ---
-def fetch_ohlcv_kraken(symbol='EUR/USD', timeframe='15m', limit=1350):
+# --- FETCH OHLCV DATA FROM KRAKEN WITH MULTIPLE REQUESTS ---
+
+def fetch_ohlcv_kraken_30days(symbol='EUR/USD', timeframe='15m'):
+    exchange = ccxt.kraken()
+    exchange.load_markets()
+    limit = 1500  # max per request
+
+    # Calculate timestamps
+    now = exchange.milliseconds()
+    timeframe_ms = exchange.parse_timeframe(timeframe) * 1000
+    candles_needed = 2880  # ~30 days of 15m candles
+
+    # We'll fetch in two batches: most recent 1500 candles, then previous 1380
+    since_2 = now - timeframe_ms * limit
+    since_1 = since_2 - timeframe_ms * (candles_needed - limit)
+
     try:
-        exchange = ccxt.kraken()
-        exchange.load_markets()
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        return df.astype(float)
+        ohlcv1 = exchange.fetch_ohlcv(symbol, timeframe, since=since_1, limit=limit)
+        ohlcv2 = exchange.fetch_ohlcv(symbol, timeframe, since=since_2, limit=limit)
     except Exception as e:
         print(f"Error fetching OHLCV data: {e}")
         traceback.print_exc()
         raise
+
+    df1 = pd.DataFrame(ohlcv1, columns=['timestamp','open','high','low','close','volume'])
+    df2 = pd.DataFrame(ohlcv2, columns=['timestamp','open','high','low','close','volume'])
+
+    df = pd.concat([df1, df2], ignore_index=True)
+    df.drop_duplicates(subset='timestamp', inplace=True)
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    return df.astype(float)
 
 # --- INDICATOR CALCULATIONS ---
 
@@ -178,14 +196,14 @@ def backtest(df):
 # --- MAIN EXECUTION ---
 
 def main():
-    print("Fetching EUR/USD 15m data from Kraken for the past ~14 days...")
-    df = fetch_ohlcv_kraken(limit=1350)
+    print("Fetching EUR/USD 15m data from Kraken for the past ~30 days...")
+    df = fetch_ohlcv_kraken_30days()
 
     print("Running backtest...")
     trades, accuracy, final_size = backtest(df)
 
     summary = (
-        f"<b>EUR/USD Kraken 15m Backtest Summary (Last ~14 days)</b>\n"
+        f"<b>EUR/USD Kraken 15m Backtest Summary (Last ~30 days)</b>\n"
         f"Total trades: {len(trades)}\n"
         f"Winning trades: {sum(t['win'] for t in trades)}\n"
         f"Accuracy: {accuracy:.2f}%\n"
