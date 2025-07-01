@@ -11,7 +11,7 @@ import traceback
 EXCHANGE_ID = 'kraken'
 SYMBOL = 'EUR/USD'
 INTERVAL = '15m'       # 15-minute candles
-LOOKBACK = 100         # 3 days (96 candles per day * 3)
+LOOKBACK = 50         # 3 days (96 candles per day * 3)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
