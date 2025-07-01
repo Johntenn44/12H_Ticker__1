@@ -11,9 +11,8 @@ import traceback
 EXCHANGE_ID = 'kraken'
 SYMBOL = 'EUR/USD'
 INTERVAL = '15m'
-LOOKBACK = 720  # 30 days approx.
-
-HOLD_CANDLES = 3  # Close position after 45 minutes (3 x 15m candles)
+FETCH_DAYS = 50          # Fetch more than 30 days to compensate for filtered days
+HOLD_CANDLES = 3         # Hold position for 3 candles (45 minutes)
 
 STARTING_UNITS = 10000
 PROFIT_UNIT_INCREASE = 9
@@ -97,16 +96,15 @@ def fetch_ohlcv_paginated(symbol, timeframe, since, limit=1000):
     df = df.astype(float)
     return df
 
-def fetch_ohlcv_30days(symbol, timeframe):
-    since = int((datetime.utcnow() - timedelta(days=30)).timestamp() * 1000)
+def fetch_ohlcv_days(symbol, timeframe, days):
+    since = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
     return fetch_ohlcv_paginated(symbol, timeframe, since)
 
-# --- FILTER OUT THURSDAYS AND OFFDAYS ---
+# --- FILTER OUT THURSDAYS AND WEEKENDS ---
 
 def filter_trading_days(df):
-    # Remove Thursdays and weekends (Saturday=5, Sunday=6)
-    df = df[~df.index.dayofweek.isin([3, 5, 6])]  # 3=Thursday, 5=Saturday, 6=Sunday
-    return df
+    # Exclude Thursdays (weekday=3), Saturday(5), Sunday(6)
+    return df[~df.index.dayofweek.isin([3, 5, 6])]
 
 # --- BACKTEST WITH TIMED EXIT ---
 
@@ -175,11 +173,11 @@ def send_telegram_message(message):
 def main():
     dt = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
     try:
-        df = fetch_ohlcv_30days(SYMBOL, INTERVAL)
+        df = fetch_ohlcv_days(SYMBOL, INTERVAL, FETCH_DAYS)
         df = filter_trading_days(df)
 
-        if len(df) < LOOKBACK:
-            print(f"Not enough data after filtering: have {len(df)} candles, need {LOOKBACK}")
+        if len(df) < 720:  # Require at least 720 candles after filtering (~5 trading days)
+            print(f"Not enough data after filtering: have {len(df)} candles, need 720")
             return
 
         final_units, accuracy, total_trades = backtest(df)
@@ -206,7 +204,7 @@ def main():
 if __name__ == "__main__":
     SYMBOL = 'EUR/USD'
     INTERVAL = '15m'
-    LOOKBACK = 3000  # 30 days
+    FETCH_DAYS = 50
     HOLD_CANDLES = 3
     PROFIT_UNIT_INCREASE = 9
     LOSS_UNIT_DECREASE = 5
