@@ -11,7 +11,7 @@ import traceback
 EXCHANGE_ID = 'kraken'
 SYMBOL = 'EUR/USD'
 INTERVAL = '15m'
-LOOKBACK = 192  # 2 days (96 candles per day * 2)
+LOOKBACK = 192  # 2 days
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -40,14 +40,16 @@ def calculate_kdj(df, length=5, ma1=3, ma2=3):
     j = 3 * k - 2 * d
     return k, d, j
 
-# --- BACKTEST FUNCTION ---
+# --- BACKTEST FUNCTION WITH UNIT ADJUSTMENT ---
 
 def backtest(df):
     rsi = calculate_rsi(df['close'])
     k, d, j = calculate_kdj(df)
 
     position = None
-    net_pnl = 0.0
+    units = 10000  # Starting units
+    unit_increase = 8
+    unit_decrease = 5
 
     for i in range(1, len(df)):
         signal = None
@@ -58,7 +60,7 @@ def backtest(df):
         elif rsi.iloc[i-1] > 70 and rsi.iloc[i] <= 70:
             signal = 'sell'
 
-        # KDJ signals: bullish/bearish crossovers
+        # KDJ signals: bullish/bearish crossovers override RSI signals if present
         if (k.iloc[i-1] < d.iloc[i-1] and k.iloc[i] > d.iloc[i] and j.iloc[i] > k.iloc[i] and j.iloc[i] > d.iloc[i]):
             signal = 'buy'
         elif (k.iloc[i-1] > d.iloc[i-1] and k.iloc[i] < d.iloc[i] and j.iloc[i] < k.iloc[i] and j.iloc[i] < d.iloc[i]):
@@ -66,19 +68,27 @@ def backtest(df):
 
         close_price = df['close'].iloc[i]
 
-        # Simple position management: enter long on buy, exit on sell
+        # Position management and units adjustment
         if position is None and signal == 'buy':
             position = close_price
         elif position is not None and signal == 'sell':
-            net_pnl += close_price - position
+            profit = close_price - position
+            if profit > 0:
+                units += unit_increase
+            else:
+                units -= unit_decrease
             position = None
 
-    # Close any open position at last price
+    # Close open position at last price
     if position is not None:
-        net_pnl += df['close'].iloc[-1] - position
+        profit = df['close'].iloc[-1] - position
+        if profit > 0:
+            units += unit_increase
+        else:
+            units -= unit_decrease
         position = None
 
-    return net_pnl
+    return units
 
 # --- DATA FETCHING ---
 
@@ -117,14 +127,14 @@ def main():
             print(f"Not enough data: have {len(df)} candles, need {LOOKBACK}")
             return
 
-        net_pnl = backtest(df)
+        final_units = backtest(df)
         current_price = df['close'].iloc[-1]
 
         msg = (
-            f"<b>{EXCHANGE_ID.capitalize()} {SYMBOL} RSI & KDJ Backtest Summary ({dt})</b>\n"
+            f"<b>{EXCHANGE_ID.capitalize()} {SYMBOL} Backtest Summary ({dt})</b>\n"
             f"Backtest Period: {len(df)} candles ({INTERVAL})\n"
             f"Current Close Price: {current_price:.6f}\n"
-            f"<b>Total Net Profit/Loss: {net_pnl:.6f} per unit traded</b>"
+            f"<b>Final Units after backtest: {final_units}</b>"
         )
 
         send_telegram_message(msg)
@@ -135,4 +145,7 @@ def main():
         traceback.print_exc()
 
 if __name__ == "__main__":
+    SYMBOL = 'EUR/USD'
+    INTERVAL = '15m'
+    LOOKBACK = 192  # 2 days
     main()
