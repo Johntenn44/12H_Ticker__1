@@ -8,10 +8,10 @@ import traceback
 
 # --- CONFIGURATION ---
 
-COINS = ["USDT/EUR"]  # KuCoin symbol for USDT/EUR
-EXCHANGE_ID = 'kucoin'
+EXCHANGE_ID = 'kraken'
 INTERVAL = '15m'      # 15-minute candles
-LOOKBACK = 288        # 288 candles ≈ 3 days (96 candles per day * 3)
+LOOKBACK = 288        # 3 days (96 candles per day * 3)
+SYMBOL = 'USDT/USD'   # Kraken symbol for USDT to USD
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -74,37 +74,20 @@ def analyze_wr_trend(wr_series):
     else:
         return "No clear WR trend"
 
-# --- DATA FETCHING AND CONVERSION ---
+# --- DATA FETCHING ---
 
-def fetch_ohlcv_and_convert(symbol, timeframe, limit):
+def fetch_ohlcv(symbol, timeframe, limit):
     exchange_class = getattr(ccxt, EXCHANGE_ID)
     exchange = exchange_class()
     exchange.load_markets()
-
     if symbol not in exchange.symbols:
         raise ValueError(f"Symbol {symbol} not available on {EXCHANGE_ID}")
-
-    # Fetch current ticker price
-    ticker = exchange.fetch_ticker(symbol)
-    current_price = 1 / ticker['last']  # Convert USDT/EUR to EUR/USDT
-
-    # Fetch OHLCV data
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
     df = df.astype(float)
-
-    # Convert prices to EUR/USDT by reciprocals
-    df['open'] = 1 / df['open']
-    df['high'] = 1 / df['low']    # invert low for high
-    df['low'] = 1 / df['high']    # invert high for low
-    df['close'] = 1 / df['close']
-
-    # Approximate volume conversion to EUR base currency
-    df['volume'] = df['volume'] * df['close']
-
-    return df, current_price
+    return df
 
 # --- BACKTEST FUNCTION ---
 
@@ -151,17 +134,20 @@ def send_telegram_message(message):
 
 def main():
     dt = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
+
     try:
-        df, current_price = fetch_ohlcv_and_convert(COINS[0], INTERVAL, LOOKBACK)
+        df = fetch_ohlcv(SYMBOL, INTERVAL, LOOKBACK)
         if len(df) < LOOKBACK:
-            print("Not enough data for backtest")
+            print(f"Not enough data for backtest: got {len(df)} candles, need {LOOKBACK}")
             return
+
+        current_price = df['close'].iloc[-1]
 
         signals = backtest(df)
 
         msg_lines = [
-            f"<b>KuCoin EUR/USDT Backtest Report ({dt})</b>",
-            f"Current Price: {current_price:.6f} EUR/USDT",
+            f"<b>Kraken USDT/USD Backtest Report ({dt})</b>",
+            f"Current Price: {current_price:.6f} USDT/USD",
             f"Backtest Period: {len(df)} candles ({INTERVAL})",
             ""
         ]
