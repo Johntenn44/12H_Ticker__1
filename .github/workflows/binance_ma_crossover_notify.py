@@ -11,7 +11,7 @@ EXCHANGE_ID = 'kraken'
 SYMBOL = 'EUR/USD'
 INTERVAL = '15m'
 HOLD_CANDLES = 3  # Close positions after 3 candles (45 minutes)
-LOOKBACK = 2880    # 30 days
+LOOKBACK = 720    # 30 days
 
 STARTING_UNITS = 10000
 PROFIT_UNIT_INCREASE = 9
