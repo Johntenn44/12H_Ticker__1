@@ -83,12 +83,6 @@ def calculate_kdj(df, length=5, ma1=8, ma2=8):
     j = 3 * k - 2 * d
     return k, d, j
 
-def add_moving_averages(df):
-    df['EMA200'] = df['close'].ewm(span=200, adjust=False).mean()
-    df['MA50'] = df['close'].rolling(window=50).mean()
-    df['MA200'] = df['close'].rolling(window=200).mean()
-    return df
-
 # --- TREND ANALYSIS FUNCTIONS ---
 
 def analyze_stoch_rsi_trend(k, d):
@@ -122,12 +116,6 @@ def analyze_kdj_trend(k, d, j):
     else:
         return "No clear KDJ trend"
 
-def price_between_mas(df):
-    cp = df['close'].iloc[-1]
-    low = min(df['MA50'].iloc[-1], df['EMA200'].iloc[-1], df['MA200'].iloc[-1])
-    high = max(df['MA50'].iloc[-1], df['EMA200'].iloc[-1], df['MA200'].iloc[-1])
-    return low <= cp <= high
-
 # --- SIGNAL GENERATION ---
 
 def generate_combined_signal(df):
@@ -137,14 +125,14 @@ def generate_combined_signal(df):
     rsi13 = calculate_rsi(df['close'], 13).iloc[-1]
     rsi21 = calculate_rsi(df['close'], 21).iloc[-1]
     kdj_k, kdj_d, kdj_j = calculate_kdj(df)
-    ma_check = price_between_mas(df)
+
     stoch_signal = analyze_stoch_rsi_trend(k, d)
     wr_signal = analyze_wr_oversold(wr)
     rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
     kdj_trend = analyze_kdj_trend(kdj_k, kdj_d, kdj_j)
 
-    # Combined buy condition example:
-    buy_signal = (ma_check and (stoch_signal or wr_signal) and rsi_trend == "Uptrend" and kdj_trend == "Bullish KDJ crossover")
+    # Buy signal without MA filters:
+    buy_signal = (stoch_signal or wr_signal) and rsi_trend == "Uptrend" and kdj_trend == "Bullish KDJ crossover"
     return buy_signal
 
 # --- BACKTESTING LOGIC ---
@@ -192,7 +180,6 @@ def backtest(df):
 def main():
     print("Fetching EUR/USD 15m data from Kraken for the past ~3 days...")
     df = fetch_ohlcv_kraken(limit=300)
-    df = add_moving_averages(df)
 
     print("Running backtest...")
     trades, accuracy, final_size = backtest(df)
