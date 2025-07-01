@@ -206,7 +206,7 @@ def main():
 if __name__ == "__main__":
     SYMBOL = 'EUR/USD'
     INTERVAL = '15m'
-    LOOKBACK = 720  # 30 days
+    LOOKBACK = 3000  # 30 days
     HOLD_CANDLES = 3
     PROFIT_UNIT_INCREASE = 9
     LOSS_UNIT_DECREASE = 5
