@@ -10,8 +10,8 @@ import traceback
 
 EXCHANGE_ID = 'kraken'
 SYMBOL = 'EUR/USD'
-INTERVAL = '15m'       # 15-minute candles
-LOOKBACK = 51         # 3 days (96 candles per day * 3)
+INTERVAL = '15m'
+LOOKBACK = 192  # 2 days (96 candles per day * 2)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -40,26 +40,25 @@ def calculate_kdj(df, length=5, ma1=3, ma2=3):
     j = 3 * k - 2 * d
     return k, d, j
 
-# --- SIGNAL GENERATION ---
+# --- BACKTEST FUNCTION ---
 
-def generate_signals(df):
+def backtest(df):
     rsi = calculate_rsi(df['close'])
     k, d, j = calculate_kdj(df)
 
-    signals = []
-    position = None  # None or 'long'
+    position = None
     net_pnl = 0.0
 
     for i in range(1, len(df)):
         signal = None
 
-        # RSI-based signals
+        # RSI signals: buy when RSI crosses above 30, sell when crosses below 70
         if rsi.iloc[i-1] < 30 and rsi.iloc[i] >= 30:
-            signal = 'buy'  # RSI crossing above oversold
+            signal = 'buy'
         elif rsi.iloc[i-1] > 70 and rsi.iloc[i] <= 70:
-            signal = 'sell'  # RSI crossing below overbought
+            signal = 'sell'
 
-        # KDJ-based signals (bullish/bearish crossover)
+        # KDJ signals: bullish/bearish crossovers
         if (k.iloc[i-1] < d.iloc[i-1] and k.iloc[i] > d.iloc[i] and j.iloc[i] > k.iloc[i] and j.iloc[i] > d.iloc[i]):
             signal = 'buy'
         elif (k.iloc[i-1] > d.iloc[i-1] and k.iloc[i] < d.iloc[i] and j.iloc[i] < k.iloc[i] and j.iloc[i] < d.iloc[i]):
@@ -67,28 +66,19 @@ def generate_signals(df):
 
         close_price = df['close'].iloc[i]
 
-        # Simple backtest logic
+        # Simple position management: enter long on buy, exit on sell
         if position is None and signal == 'buy':
-            position = {'entry_price': close_price, 'entry_index': i}
+            position = close_price
         elif position is not None and signal == 'sell':
-            trade_pnl = close_price - position['entry_price']
-            net_pnl += trade_pnl
+            net_pnl += close_price - position
             position = None
-
-        signals.append({
-            'timestamp': df.index[i],
-            'signal': signal,
-            'close': close_price,
-            'net_pnl': net_pnl
-        })
 
     # Close any open position at last price
     if position is not None:
-        trade_pnl = df['close'].iloc[-1] - position['entry_price']
-        net_pnl += trade_pnl
+        net_pnl += df['close'].iloc[-1] - position
         position = None
 
-    return signals, net_pnl
+    return net_pnl
 
 # --- DATA FETCHING ---
 
@@ -127,32 +117,22 @@ def main():
             print(f"Not enough data: have {len(df)} candles, need {LOOKBACK}")
             return
 
-        signals, net_pnl = generate_signals(df)
+        net_pnl = backtest(df)
+        current_price = df['close'].iloc[-1]
 
-        msg_lines = [
-            f"<b>{EXCHANGE_ID.capitalize()} {SYMBOL} RSI & KDJ Backtest ({dt})</b>",
-            f"Current Price: {df['close'].iloc[-1]:.6f}",
-            f"Backtest Period: {len(df)} candles ({INTERVAL})",
-            f"<b>Net Profit/Loss: {net_pnl:.6f} per unit traded</b>",
-            "",
-            "<b>Signals:</b>"
-        ]
+        msg = (
+            f"<b>{EXCHANGE_ID.capitalize()} {SYMBOL} RSI & KDJ Backtest Summary ({dt})</b>\n"
+            f"Backtest Period: {len(df)} candles ({INTERVAL})\n"
+            f"Current Close Price: {current_price:.6f}\n"
+            f"<b>Total Net Profit/Loss: {net_pnl:.6f} per unit traded</b>"
+        )
 
-        for s in signals:
-            if s['signal'] is not None:
-                ts = s['timestamp'].strftime('%Y-%m-%d %H:%M')
-                msg_lines.append(f"{ts} | Signal: {s['signal'].capitalize()} | Close: {s['close']:.6f} | Net PnL: {s['net_pnl']:.6f}")
-
-        send_telegram_message("\n".join(msg_lines))
-        print("Backtest report sent.")
+        send_telegram_message(msg)
+        print("Backtest summary sent.")
 
     except Exception as e:
         print(f"Error: {e}")
         traceback.print_exc()
 
 if __name__ == "__main__":
-    # Define constants here
-    SYMBOL = 'EUR/USD'
-    INTERVAL = '15m'
-    LOOKBACK = 288  # 3 days of 15m candles
     main()
