@@ -11,7 +11,7 @@ import traceback
 COINS = ["USDT/EUR"]  # KuCoin symbol for USDT/EUR
 EXCHANGE_ID = 'kucoin'
 INTERVAL = '15m'      # 15-minute candles
-LOOKBACK = 1440       # 1440 candles ≈ 15 days
+LOOKBACK = 288        # 288 candles ≈ 3 days (96 candles per day * 3)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
