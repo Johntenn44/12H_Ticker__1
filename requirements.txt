@@ -4,4 +4,3 @@ pandas
 python-telegram-bot
 pytz
 numpy
-traceback
