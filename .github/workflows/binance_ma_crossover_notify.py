@@ -10,7 +10,8 @@ import traceback
 
 EXCHANGE_ID = 'kraken'   # or 'kucoin'
 INTERVAL = '15m'
-LOOKBACK = 96            # 1 day (96 * 15min = 24 hours)
+LOOKBACK = 192  # 2 days
+hours)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
