@@ -8,9 +8,10 @@ import traceback
 
 # --- CONFIGURATION ---
 
-EXCHANGE_ID = 'kraken'   # or 'kucoin'
-INTERVAL = '15m'
-LOOKBACK = 192  # 2 days
+EXCHANGE_ID = 'kraken'
+SYMBOL = 'EUR/USD'
+INTERVAL = '15m'       # 15-minute candles
+LOOKBACK = 288         # 3 days (96 candles per day * 3)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -20,7 +21,7 @@ if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
 
 # --- INDICATOR CALCULATIONS ---
 
-def calculate_rsi(series, period=13):
+def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -30,50 +31,66 @@ def calculate_rsi(series, period=13):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-def calculate_stoch_rsi(df, rsi_length=13, stoch_length=8, smooth_k=5, smooth_d=3):
-    rsi = calculate_rsi(df['close'], rsi_length)
-    min_rsi = rsi.rolling(window=stoch_length).min()
-    max_rsi = rsi.rolling(window=stoch_length).max()
-    denominator = max_rsi - min_rsi
-    denominator = denominator.replace(0, np.nan)
-    stoch_rsi = (rsi - min_rsi) / denominator * 100
-    stoch_rsi = stoch_rsi.fillna(method='ffill')
-    k = stoch_rsi.rolling(window=smooth_k).mean()
-    d = k.rolling(window=smooth_d).mean()
-    return k, d
+def calculate_kdj(df, length=5, ma1=3, ma2=3):
+    low_min = df['low'].rolling(window=length, min_periods=1).min()
+    high_max = df['high'].rolling(window=length, min_periods=1).max()
+    rsv = (df['close'] - low_min) / (high_max - low_min) * 100
+    k = rsv.ewm(span=ma1, adjust=False).mean()
+    d = k.ewm(span=ma2, adjust=False).mean()
+    j = 3 * k - 2 * d
+    return k, d, j
 
-def calculate_wr(df, length):
-    highest_high = df['high'].rolling(window=length).max()
-    lowest_low = df['low'].rolling(window=length).min()
-    denominator = highest_high - lowest_low
-    denominator = denominator.replace(0, np.nan)
-    wr = (highest_high - df['close']) / denominator * -100
-    return wr.fillna(method='ffill')
+# --- SIGNAL GENERATION ---
 
-# --- TREND LOGIC ---
+def generate_signals(df):
+    rsi = calculate_rsi(df['close'])
+    k, d, j = calculate_kdj(df)
 
-def analyze_stoch_rsi_trend(k, d):
-    if len(k) < 2 or pd.isna(k.iloc[-2]) or pd.isna(d.iloc[-2]) or pd.isna(k.iloc[-1]) or pd.isna(d.iloc[-1]):
-        return "No clear Stoch RSI trend"
-    if k.iloc[-2] < d.iloc[-2] and k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 80:
-        return "Uptrend"
-    elif k.iloc[-2] > d.iloc[-2] and k.iloc[-1] < d.iloc[-1] and k.iloc[-1] > 20:
-        return "Downtrend"
-    else:
-        return "No clear Stoch RSI trend"
+    signals = []
+    position = None  # None or 'long'
+    net_pnl = 0.0
 
-def analyze_wr_trend(wr_series):
-    if len(wr_series) < 2 or pd.isna(wr_series.iloc[-2]) or pd.isna(wr_series.iloc[-1]):
-        return "No clear WR trend"
-    prev, curr = wr_series.iloc[-2], wr_series.iloc[-1]
-    if prev > -80 and curr <= -80:
-        return "WR Oversold - Buy signal"
-    elif prev < -20 and curr >= -20:
-        return "WR Overbought - Sell signal"
-    else:
-        return "No clear WR trend"
+    for i in range(1, len(df)):
+        signal = None
 
-# --- DATA FETCHING AND EUR/USD CALCULATION ---
+        # RSI-based signals
+        if rsi.iloc[i-1] < 30 and rsi.iloc[i] >= 30:
+            signal = 'buy'  # RSI crossing above oversold
+        elif rsi.iloc[i-1] > 70 and rsi.iloc[i] <= 70:
+            signal = 'sell'  # RSI crossing below overbought
+
+        # KDJ-based signals (bullish/bearish crossover)
+        if (k.iloc[i-1] < d.iloc[i-1] and k.iloc[i] > d.iloc[i] and j.iloc[i] > k.iloc[i] and j.iloc[i] > d.iloc[i]):
+            signal = 'buy'
+        elif (k.iloc[i-1] > d.iloc[i-1] and k.iloc[i] < d.iloc[i] and j.iloc[i] < k.iloc[i] and j.iloc[i] < d.iloc[i]):
+            signal = 'sell'
+
+        close_price = df['close'].iloc[i]
+
+        # Simple backtest logic
+        if position is None and signal == 'buy':
+            position = {'entry_price': close_price, 'entry_index': i}
+        elif position is not None and signal == 'sell':
+            trade_pnl = close_price - position['entry_price']
+            net_pnl += trade_pnl
+            position = None
+
+        signals.append({
+            'timestamp': df.index[i],
+            'signal': signal,
+            'close': close_price,
+            'net_pnl': net_pnl
+        })
+
+    # Close any open position at last price
+    if position is not None:
+        trade_pnl = df['close'].iloc[-1] - position['entry_price']
+        net_pnl += trade_pnl
+        position = None
+
+    return signals, net_pnl
+
+# --- DATA FETCHING ---
 
 def fetch_ohlcv(symbol, timeframe, limit):
     exchange_class = getattr(ccxt, EXCHANGE_ID)
@@ -88,77 +105,6 @@ def fetch_ohlcv(symbol, timeframe, limit):
     df = df.astype(float)
     return df
 
-def get_eur_usd_from_usdt_pairs(timeframe, limit):
-    # Fetch USDT/USD and USDT/EUR OHLCV data
-    df_usdt_usd = fetch_ohlcv('USDT/USD', timeframe, limit)
-    df_usdt_eur = fetch_ohlcv('USDT/EUR', timeframe, limit)
-
-    # Align timestamps (inner join)
-    df = df_usdt_usd.join(df_usdt_eur, lsuffix='_usd', rsuffix='_eur', how='inner')
-
-    # Calculate EUR/USD prices = USDT/USD price / USDT/EUR price
-    df['open'] = df['open_usd'] / df['open_eur']
-    df['high'] = df['high_usd'] / df['high_eur']
-    df['low'] = df['low_usd'] / df['low_eur']
-    df['close'] = df['close_usd'] / df['close_eur']
-
-    # Volume: average of both volumes as proxy
-    df['volume'] = (df['volume_usd'] + df['volume_eur']) / 2
-
-    # Keep only relevant columns
-    df = df[['open', 'high', 'low', 'close', 'volume']]
-
-    return df
-
-# --- BACKTEST FUNCTION WITH NET PnL ---
-
-def backtest(df):
-    signals = []
-    WR_PERIODS = [3, 8, 13, 55, 144, 233]
-    start_index = max(20, max(WR_PERIODS))
-
-    position = None
-    net_pnl = 0.0
-
-    for i in range(start_index, len(df)):
-        window = df.iloc[:i+1].copy()
-
-        k, d = calculate_stoch_rsi(window)
-        stoch_trend = analyze_stoch_rsi_trend(k, d)
-
-        wr_signals = []
-        for period in WR_PERIODS:
-            wr = calculate_wr(window, period)
-            trend = analyze_wr_trend(wr)
-            if "No clear" not in trend:
-                wr_signals.append(f"WR{period}: {trend}")
-
-        # Simple trade logic: enter long on Uptrend, exit on Downtrend
-        if position is None and stoch_trend == "Uptrend":
-            position = {'entry_price': window['close'].iloc[-1]}
-        elif position is not None and stoch_trend == "Downtrend":
-            exit_price = window['close'].iloc[-1]
-            trade_pnl = exit_price - position['entry_price']
-            net_pnl += trade_pnl
-            position = None
-
-        if "No clear" not in stoch_trend or wr_signals:
-            signals.append({
-                'timestamp': window.index[-1],
-                'stoch_trend': stoch_trend,
-                'wr_signals': ", ".join(wr_signals) if wr_signals else "No WR signals",
-                'net_pnl': net_pnl
-            })
-
-    # Close open position at last price
-    if position is not None:
-        exit_price = df['close'].iloc[-1]
-        trade_pnl = exit_price - position['entry_price']
-        net_pnl += trade_pnl
-        position = None
-
-    return signals, net_pnl
-
 # --- TELEGRAM NOTIFICATION ---
 
 def send_telegram_message(message):
@@ -171,35 +117,31 @@ def send_telegram_message(message):
     resp = requests.post(url, json=payload)
     resp.raise_for_status()
 
-# --- MAIN LOGIC ---
+# --- MAIN ---
 
 def main():
     dt = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
     try:
-        df = get_eur_usd_from_usdt_pairs(INTERVAL, LOOKBACK)
+        df = fetch_ohlcv(SYMBOL, INTERVAL, LOOKBACK)
         if len(df) < LOOKBACK:
-            print(f"Not enough data for backtest: got {len(df)} candles, need {LOOKBACK}")
+            print(f"Not enough data: have {len(df)} candles, need {LOOKBACK}")
             return
 
-        current_price = df['close'].iloc[-1]
-
-        signals, net_pnl = backtest(df)
+        signals, net_pnl = generate_signals(df)
 
         msg_lines = [
-            f"<b>{EXCHANGE_ID.capitalize()} EUR/USD Backtest Report ({dt})</b>",
-            f"Current Price: {current_price:.6f} EUR/USD",
+            f"<b>{EXCHANGE_ID.capitalize()} {SYMBOL} RSI & KDJ Backtest ({dt})</b>",
+            f"Current Price: {df['close'].iloc[-1]:.6f}",
             f"Backtest Period: {len(df)} candles ({INTERVAL})",
             f"<b>Net Profit/Loss: {net_pnl:.6f} per unit traded</b>",
-            ""
+            "",
+            "<b>Signals:</b>"
         ]
 
-        if signals:
-            msg_lines.append("<b>Signals:</b>")
-            for s in signals:
+        for s in signals:
+            if s['signal'] is not None:
                 ts = s['timestamp'].strftime('%Y-%m-%d %H:%M')
-                msg_lines.append(f"{ts} | StochRSI: {s['stoch_trend']} | WR: {s['wr_signals']} | Net PnL: {s['net_pnl']:.6f}")
-        else:
-            msg_lines.append("No trading signals detected.")
+                msg_lines.append(f"{ts} | Signal: {s['signal'].capitalize()} | Close: {s['close']:.6f} | Net PnL: {s['net_pnl']:.6f}")
 
         send_telegram_message("\n".join(msg_lines))
         print("Backtest report sent.")
@@ -209,4 +151,8 @@ def main():
         traceback.print_exc()
 
 if __name__ == "__main__":
+    # Define constants here
+    SYMBOL = 'EUR/USD'
+    INTERVAL = '15m'
+    LOOKBACK = 288  # 3 days of 15m candles
     main()
