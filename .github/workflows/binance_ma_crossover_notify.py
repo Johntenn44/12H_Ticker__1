@@ -28,7 +28,7 @@ def send_telegram_message(message):
         print(f"Failed to send Telegram message: {e}")
 
 # --- FETCH OHLCV DATA FROM KRAKEN ---
-def fetch_ohlcv_kraken(symbol='EUR/USD', timeframe='15m', limit=500):
+def fetch_ohlcv_kraken(symbol='EUR/USD', timeframe='15m', limit=300):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
@@ -190,15 +190,15 @@ def backtest(df):
 # --- MAIN EXECUTION ---
 
 def main():
-    print("Fetching EUR/USD 15m data from Kraken...")
-    df = fetch_ohlcv_kraken()
+    print("Fetching EUR/USD 15m data from Kraken for the past ~3 days...")
+    df = fetch_ohlcv_kraken(limit=300)
     df = add_moving_averages(df)
 
     print("Running backtest...")
     trades, accuracy, final_size = backtest(df)
 
     summary = (
-        f"<b>EUR/USD Kraken 15m Backtest Summary</b>\n"
+        f"<b>EUR/USD Kraken 15m Backtest Summary (Last ~3 days)</b>\n"
         f"Total trades: {len(trades)}\n"
         f"Winning trades: {sum(t['win'] for t in trades)}\n"
         f"Accuracy: {accuracy:.2f}%\n"
