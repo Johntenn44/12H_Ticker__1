@@ -3,7 +3,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 import traceback
 
 # --- TELEGRAM CONFIGURATION ---
@@ -34,12 +34,10 @@ def fetch_ohlcv_kraken_30days(symbol='EUR/USD', timeframe='15m'):
     exchange.load_markets()
     limit = 1500  # max per request
 
-    # Calculate timestamps
     now = exchange.milliseconds()
     timeframe_ms = exchange.parse_timeframe(timeframe) * 1000
     candles_needed = 2880  # ~30 days of 15m candles
 
-    # We'll fetch in two batches: most recent 1500 candles, then previous 1380
     since_2 = now - timeframe_ms * limit
     since_1 = since_2 - timeframe_ms * (candles_needed - limit)
 
@@ -202,19 +200,35 @@ def main():
     print("Running backtest...")
     trades, accuracy, final_size = backtest(df)
 
-    summary = (
-        f"<b>EUR/USD Kraken 15m Backtest Summary (Last ~30 days)</b>\n"
-        f"Total trades: {len(trades)}\n"
-        f"Winning trades: {sum(t['win'] for t in trades)}\n"
-        f"Accuracy: {accuracy:.2f}%\n"
-        f"Final position size (units): {final_size}"
-    )
+    summary_lines = [
+        f"<b>EUR/USD Kraken 15m Backtest Summary (Last ~30 days)</b>",
+        f"Total trades: {len(trades)}",
+        f"Winning trades: {sum(t['win'] for t in trades)}",
+        f"Accuracy: {accuracy:.2f}%",
+        f"Final position size (units): {final_size}",
+        "",
+        "<b>Sample trades:</b>"
+    ]
+
+    # Include up to first 5 trades with date/time in Telegram message
+    for t in trades[:5]:
+        entry_time_str = t['entry_time'].strftime('%Y-%m-%d %H:%M')
+        exit_time_str = t['exit_time'].strftime('%Y-%m-%d %H:%M')
+        line = (f"Entry: {entry_time_str} @ {t['entry_price']:.5f} | "
+                f"Exit: {exit_time_str} @ {t['exit_price']:.5f} | "
+                f"PnL: {t['pnl']:.2f} | {'WIN' if t['win'] else 'LOSS'}")
+        summary_lines.append(line)
+
+    summary = "\n".join(summary_lines)
 
     print(summary)
     send_telegram_message(summary)
 
+    # Print all trades on console with formatted date/time
     for t in trades:
-        print(f"Entry: {t['entry_time']} @ {t['entry_price']:.5f} | Exit: {t['exit_time']} @ {t['exit_price']:.5f} | "
+        entry_time_str = t['entry_time'].strftime('%Y-%m-%d %H:%M')
+        exit_time_str = t['exit_time'].strftime('%Y-%m-%d %H:%M')
+        print(f"Entry: {entry_time_str} @ {t['entry_price']:.5f} | Exit: {exit_time_str} @ {t['exit_price']:.5f} | "
               f"PnL: {t['pnl']:.2f} | {'WIN' if t['win'] else 'LOSS'}")
 
 if __name__ == "__main__":
