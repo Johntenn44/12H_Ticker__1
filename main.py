@@ -6,6 +6,9 @@ import requests
 import time
 from datetime import datetime
 import traceback
+from keep_alive import keep_alive
+keep_alive()
+
 
 # --- TELEGRAM CONFIGURATION ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
