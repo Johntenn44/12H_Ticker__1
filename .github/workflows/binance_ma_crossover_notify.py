@@ -27,32 +27,38 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"Failed to send Telegram message: {e}")
 
-# --- FETCH OHLCV DATA FROM KRAKEN WITH MULTIPLE REQUESTS ---
+# --- FETCH OHLCV DATA FROM KRAKEN IN MULTIPLE BATCHES ---
 
-def fetch_ohlcv_kraken_30days(symbol='EUR/USD', timeframe='15m'):
+def fetch_ohlcv_kraken_70days(symbol='EUR/USD', timeframe='15m'):
     exchange = ccxt.kraken()
     exchange.load_markets()
-    limit = 1500  # max per request
+    limit = 1500  # max candles per request
+    timeframe_ms = exchange.parse_timeframe(timeframe) * 1000
+    total_candles = 6720  # ~70 days of 15m candles
 
     now = exchange.milliseconds()
-    timeframe_ms = exchange.parse_timeframe(timeframe) * 1000
-    candles_needed = 2880  # ~30 days of 15m candles
+    all_ohlcv = []
 
-    since_2 = now - timeframe_ms * limit
-    since_1 = since_2 - timeframe_ms * (candles_needed - limit)
+    # Calculate how many full batches needed
+    batches = (total_candles // limit) + (1 if total_candles % limit else 0)
 
-    try:
-        ohlcv1 = exchange.fetch_ohlcv(symbol, timeframe, since=since_1, limit=limit)
-        ohlcv2 = exchange.fetch_ohlcv(symbol, timeframe, since=since_2, limit=limit)
-    except Exception as e:
-        print(f"Error fetching OHLCV data: {e}")
-        traceback.print_exc()
-        raise
+    since = now - total_candles * timeframe_ms
 
-    df1 = pd.DataFrame(ohlcv1, columns=['timestamp','open','high','low','close','volume'])
-    df2 = pd.DataFrame(ohlcv2, columns=['timestamp','open','high','low','close','volume'])
+    for i in range(batches):
+        try:
+            print(f"Fetching batch {i+1}/{batches} from {datetime.utcfromtimestamp(since/1000)}")
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
+            if not ohlcv:
+                break
+            all_ohlcv.extend(ohlcv)
+            # Update since to last candle timestamp + 1 ms to avoid overlap
+            since = ohlcv[-1][0] + 1
+        except Exception as e:
+            print(f"Error fetching OHLCV data in batch {i+1}: {e}")
+            traceback.print_exc()
+            break
 
-    df = pd.concat([df1, df2], ignore_index=True)
+    df = pd.DataFrame(all_ohlcv, columns=['timestamp','open','high','low','close','volume'])
     df.drop_duplicates(subset='timestamp', inplace=True)
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
@@ -194,14 +200,14 @@ def backtest(df):
 # --- MAIN EXECUTION ---
 
 def main():
-    print("Fetching EUR/USD 15m data from Kraken for the past ~30 days...")
-    df = fetch_ohlcv_kraken_30days()
+    print("Fetching EUR/USD 15m data from Kraken for the past ~70 days...")
+    df = fetch_ohlcv_kraken_70days()
 
     print("Running backtest...")
     trades, accuracy, final_size = backtest(df)
 
     summary_lines = [
-        f"<b>EUR/USD Kraken 15m Backtest Summary (Last ~30 days)</b>",
+        f"<b>EUR/USD Kraken 15m Backtest Summary (Last ~70 days)</b>",
         f"Total trades: {len(trades)}",
         f"Winning trades: {sum(t['win'] for t in trades)}",
         f"Accuracy: {accuracy:.2f}%",
