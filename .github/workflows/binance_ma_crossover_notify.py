@@ -8,10 +8,9 @@ import traceback
 
 # --- CONFIGURATION ---
 
-EXCHANGE_ID = 'kraken'
-INTERVAL = '15m'      # 15-minute candles
-LOOKBACK = 288        # 3 days (96 candles per day * 3)
-SYMBOL = 'USDT/USD'   # Kraken symbol for USDT to USD
+EXCHANGE_ID = 'kraken'   # or 'kucoin' if you prefer
+INTERVAL = '15m'
+LOOKBACK = 288           # 3 days approx
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -74,7 +73,7 @@ def analyze_wr_trend(wr_series):
     else:
         return "No clear WR trend"
 
-# --- DATA FETCHING ---
+# --- DATA FETCHING AND EUR/USD CALCULATION ---
 
 def fetch_ohlcv(symbol, timeframe, limit):
     exchange_class = getattr(ccxt, EXCHANGE_ID)
@@ -89,12 +88,37 @@ def fetch_ohlcv(symbol, timeframe, limit):
     df = df.astype(float)
     return df
 
-# --- BACKTEST FUNCTION ---
+def get_eur_usd_from_usdt_pairs(timeframe, limit):
+    # Fetch USDT/USD and USDT/EUR data
+    df_usdt_usd = fetch_ohlcv('USDT/USD', timeframe, limit)
+    df_usdt_eur = fetch_ohlcv('USDT/EUR', timeframe, limit)
+
+    # Align timestamps (inner join)
+    df = df_usdt_usd.join(df_usdt_eur, lsuffix='_usd', rsuffix='_eur', how='inner')
+
+    # Calculate EUR/USD prices = USDT/USD price / USDT/EUR price
+    df['open'] = df['open_usd'] / df['open_eur']
+    df['high'] = df['high_usd'] / df['high_eur']
+    df['low'] = df['low_usd'] / df['low_eur']
+    df['close'] = df['close_usd'] / df['close_eur']
+
+    # Volume: approximate by USDT/USD volume or average (optional)
+    df['volume'] = (df['volume_usd'] + df['volume_eur']) / 2
+
+    # Keep only relevant columns
+    df = df[['open', 'high', 'low', 'close', 'volume']]
+
+    return df
+
+# --- BACKTEST FUNCTION (with net PnL example) ---
 
 def backtest(df):
     signals = []
     WR_PERIODS = [3, 8, 13, 55, 144, 233]
     start_index = max(20, max(WR_PERIODS))
+
+    position = None
+    net_pnl = 0.0
 
     for i in range(start_index, len(df)):
         window = df.iloc[:i+1].copy()
@@ -109,14 +133,31 @@ def backtest(df):
             if "No clear" not in trend:
                 wr_signals.append(f"WR{period}: {trend}")
 
+        # Simple trade logic example:
+        if position is None and stoch_trend == "Uptrend":
+            position = {'entry_price': window['close'].iloc[-1]}
+        elif position is not None and stoch_trend == "Downtrend":
+            exit_price = window['close'].iloc[-1]
+            trade_pnl = exit_price - position['entry_price']
+            net_pnl += trade_pnl
+            position = None
+
         if "No clear" not in stoch_trend or wr_signals:
             signals.append({
                 'timestamp': window.index[-1],
                 'stoch_trend': stoch_trend,
-                'wr_signals': ", ".join(wr_signals) if wr_signals else "No WR signals"
+                'wr_signals': ", ".join(wr_signals) if wr_signals else "No WR signals",
+                'net_pnl': net_pnl
             })
 
-    return signals
+    # Close open position at last price
+    if position is not None:
+        exit_price = df['close'].iloc[-1]
+        trade_pnl = exit_price - position['entry_price']
+        net_pnl += trade_pnl
+        position = None
+
+    return signals, net_pnl
 
 # --- TELEGRAM NOTIFICATION ---
 
@@ -130,25 +171,25 @@ def send_telegram_message(message):
     resp = requests.post(url, json=payload)
     resp.raise_for_status()
 
-# --- MAIN LOGIC ---
+# --- MAIN ---
 
 def main():
     dt = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
-
     try:
-        df = fetch_ohlcv(SYMBOL, INTERVAL, LOOKBACK)
+        df = get_eur_usd_from_usdt_pairs(INTERVAL, LOOKBACK)
         if len(df) < LOOKBACK:
             print(f"Not enough data for backtest: got {len(df)} candles, need {LOOKBACK}")
             return
 
         current_price = df['close'].iloc[-1]
 
-        signals = backtest(df)
+        signals, net_pnl = backtest(df)
 
         msg_lines = [
-            f"<b>Kraken USDT/USD Backtest Report ({dt})</b>",
-            f"Current Price: {current_price:.6f} USDT/USD",
+            f"<b>{EXCHANGE_ID.capitalize()} EUR/USD Backtest Report ({dt})</b>",
+            f"Current Price: {current_price:.6f} EUR/USD",
             f"Backtest Period: {len(df)} candles ({INTERVAL})",
+            f"<b>Net Profit/Loss: {net_pnl:.6f} per unit traded</b>",
             ""
         ]
 
@@ -156,7 +197,7 @@ def main():
             msg_lines.append("<b>Signals:</b>")
             for s in signals:
                 ts = s['timestamp'].strftime('%Y-%m-%d %H:%M')
-                msg_lines.append(f"{ts} | StochRSI: {s['stoch_trend']} | WR: {s['wr_signals']}")
+                msg_lines.append(f"{ts} | StochRSI: {s['stoch_trend']} | WR: {s['wr_signals']} | Net PnL: {s['net_pnl']:.6f}")
         else:
             msg_lines.append("No trading signals detected.")
 
