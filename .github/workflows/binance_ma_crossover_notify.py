@@ -13,6 +13,10 @@ SYMBOL = 'EUR/USD'
 INTERVAL = '15m'
 LOOKBACK = 192  # 2 days
 
+STARTING_UNITS = 10000
+PROFIT_UNIT_INCREASE = 9
+LOSS_UNIT_DECREASE = 5
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -40,16 +44,14 @@ def calculate_kdj(df, length=5, ma1=3, ma2=3):
     j = 3 * k - 2 * d
     return k, d, j
 
-# --- BACKTEST FUNCTION WITH UNIT ADJUSTMENT ---
+# --- BACKTEST FUNCTION ---
 
 def backtest(df):
     rsi = calculate_rsi(df['close'])
     k, d, j = calculate_kdj(df)
 
     position = None
-    units = 10000  # Starting units
-    unit_increase = 8
-    unit_decrease = 5
+    units = STARTING_UNITS
 
     for i in range(1, len(df)):
         signal = None
@@ -60,7 +62,7 @@ def backtest(df):
         elif rsi.iloc[i-1] > 70 and rsi.iloc[i] <= 70:
             signal = 'sell'
 
-        # KDJ signals: bullish/bearish crossovers override RSI signals if present
+        # KDJ signals: bullish/bearish crossovers override RSI signals
         if (k.iloc[i-1] < d.iloc[i-1] and k.iloc[i] > d.iloc[i] and j.iloc[i] > k.iloc[i] and j.iloc[i] > d.iloc[i]):
             signal = 'buy'
         elif (k.iloc[i-1] > d.iloc[i-1] and k.iloc[i] < d.iloc[i] and j.iloc[i] < k.iloc[i] and j.iloc[i] < d.iloc[i]):
@@ -68,24 +70,24 @@ def backtest(df):
 
         close_price = df['close'].iloc[i]
 
-        # Position management and units adjustment
         if position is None and signal == 'buy':
-            position = close_price
+            position = {'entry_price': close_price}
         elif position is not None and signal == 'sell':
-            profit = close_price - position
-            if profit > 0:
-                units += unit_increase
+            trade_pnl = close_price - position['entry_price']
+            # Update units based on profit or loss
+            if trade_pnl > 0:
+                units += PROFIT_UNIT_INCREASE
             else:
-                units -= unit_decrease
+                units -= LOSS_UNIT_DECREASE
             position = None
 
-    # Close open position at last price
+    # Close any open position at last price (considered loss or profit)
     if position is not None:
-        profit = df['close'].iloc[-1] - position
-        if profit > 0:
-            units += unit_increase
+        trade_pnl = df['close'].iloc[-1] - position['entry_price']
+        if trade_pnl > 0:
+            units += PROFIT_UNIT_INCREASE
         else:
-            units -= unit_decrease
+            units -= LOSS_UNIT_DECREASE
         position = None
 
     return units
@@ -134,7 +136,8 @@ def main():
             f"<b>{EXCHANGE_ID.capitalize()} {SYMBOL} Backtest Summary ({dt})</b>\n"
             f"Backtest Period: {len(df)} candles ({INTERVAL})\n"
             f"Current Close Price: {current_price:.6f}\n"
-            f"<b>Final Units after backtest: {final_units}</b>"
+            f"<b>Starting Units:</b> {STARTING_UNITS}\n"
+            f"<b>Final Units after backtest:</b> {final_units}"
         )
 
         send_telegram_message(msg)
