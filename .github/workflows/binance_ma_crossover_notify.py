@@ -29,19 +29,17 @@ def send_telegram_message(message):
 
 # --- FETCH OHLCV DATA FROM KRAKEN IN MULTIPLE BATCHES ---
 
-def fetch_ohlcv_kraken_70days(symbol='EUR/USD', timeframe='15m'):
+def fetch_ohlcv_kraken_100days(symbol='EUR/USD', timeframe='15m'):
     exchange = ccxt.kraken()
     exchange.load_markets()
     limit = 1500  # max candles per request
     timeframe_ms = exchange.parse_timeframe(timeframe) * 1000
-    total_candles = 6720  # ~70 days of 15m candles
+    total_candles = 9600  # ~100 days of 15m candles
 
     now = exchange.milliseconds()
     all_ohlcv = []
 
-    # Calculate how many full batches needed
     batches = (total_candles // limit) + (1 if total_candles % limit else 0)
-
     since = now - total_candles * timeframe_ms
 
     for i in range(batches):
@@ -51,7 +49,6 @@ def fetch_ohlcv_kraken_70days(symbol='EUR/USD', timeframe='15m'):
             if not ohlcv:
                 break
             all_ohlcv.extend(ohlcv)
-            # Update since to last candle timestamp + 1 ms to avoid overlap
             since = ohlcv[-1][0] + 1
         except Exception as e:
             print(f"Error fetching OHLCV data in batch {i+1}: {e}")
@@ -153,7 +150,6 @@ def generate_combined_signal(df):
     rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
     kdj_trend = analyze_kdj_trend(kdj_k, kdj_d, kdj_j)
 
-    # Buy signal without MA filters:
     buy_signal = (stoch_signal or wr_signal) and rsi_trend == "Uptrend" and kdj_trend == "Bullish KDJ crossover"
     return buy_signal
 
@@ -200,14 +196,14 @@ def backtest(df):
 # --- MAIN EXECUTION ---
 
 def main():
-    print("Fetching EUR/USD 15m data from Kraken for the past ~70 days...")
-    df = fetch_ohlcv_kraken_70days()
+    print("Fetching EUR/USD 15m data from Kraken for the past ~100 days...")
+    df = fetch_ohlcv_kraken_100days()
 
     print("Running backtest...")
     trades, accuracy, final_size = backtest(df)
 
     summary_lines = [
-        f"<b>EUR/USD Kraken 15m Backtest Summary (Last ~70 days)</b>",
+        f"<b>EUR/USD Kraken 15m Backtest Summary (Last ~100 days)</b>",
         f"Total trades: {len(trades)}",
         f"Winning trades: {sum(t['win'] for t in trades)}",
         f"Accuracy: {accuracy:.2f}%",
@@ -216,7 +212,6 @@ def main():
         "<b>Sample trades:</b>"
     ]
 
-    # Include up to first 5 trades with date/time in Telegram message
     for t in trades[:5]:
         entry_time_str = t['entry_time'].strftime('%Y-%m-%d %H:%M')
         exit_time_str = t['exit_time'].strftime('%Y-%m-%d %H:%M')
@@ -230,7 +225,6 @@ def main():
     print(summary)
     send_telegram_message(summary)
 
-    # Print all trades on console with formatted date/time
     for t in trades:
         entry_time_str = t['entry_time'].strftime('%Y-%m-%d %H:%M')
         exit_time_str = t['exit_time'].strftime('%Y-%m-%d %H:%M')
