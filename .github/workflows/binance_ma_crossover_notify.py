@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import requests
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 import traceback
 
 
@@ -35,8 +35,6 @@ def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=None):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
-        # Kraken uses 'EUR/USD' as 'EUR/USD' or 'EUR/USD:USD' depending on market, verify symbol
-        # Kraken's ccxt symbol for EUR/USD is usually 'EUR/USD'
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -160,7 +158,7 @@ def check_signal(df):
 
 # --- BACKTEST FUNCTION ---
 
-def backtest(symbol='EUR/USD', timeframe='15m', days=2):
+def backtest(symbol='EUR/USD', timeframe='15m', days=15):
     print(f"Starting backtest for last {days} days on {symbol} with timeframe {timeframe}...")
     exchange = ccxt.kraken()
     exchange.load_markets()
@@ -171,13 +169,12 @@ def backtest(symbol='EUR/USD', timeframe='15m', days=2):
     df = fetch_ohlcv(symbol, timeframe, since=since)
     if df is None or df.empty:
         print("No historical data fetched for backtest.")
-        return
+        return 0, []
 
     signals = []
     correct_signals = 0
     total_signals = 0
 
-    # We will generate signals starting from index where indicators have enough data
     start_index = 30  # enough candles for indicators to stabilize
 
     for i in range(start_index, len(df)-1):
@@ -185,9 +182,6 @@ def backtest(symbol='EUR/USD', timeframe='15m', days=2):
         signal = check_signal(window_df)
         if signal is not None:
             total_signals += 1
-            # Define correctness:
-            # For buy: next candle close > current close
-            # For sell: next candle close < current close
             current_close = df['close'].iloc[i]
             next_close = df['close'].iloc[i+1]
             if (signal == "buy" and next_close > current_close) or (signal == "sell" and next_close < current_close):
@@ -225,13 +219,12 @@ def main(live_mode=True):
 
             time.sleep(300)  # wait 5 minutes before next check
     else:
-        # Run backtest mode
-        accuracy, signals = backtest()
-        print(f"Backtest Accuracy: {accuracy:.2f}%")
-        # Optionally, print signals or save to file for analysis
+        accuracy, signals = backtest(days=15)
+        print(f"Backtest Accuracy over 15 days: {accuracy:.2f}%")
+        # Uncomment below to print detailed signals
         # for ts, sig, c_close, n_close in signals:
         #     print(f"{ts} Signal: {sig} Close: {c_close} Next Close: {n_close}")
 
 if __name__ == "__main__":
-    # Set live_mode=False to run backtest, True for live trading signals
+    # Set live_mode=True for live trading signals, False to run backtest
     main(live_mode=False)
