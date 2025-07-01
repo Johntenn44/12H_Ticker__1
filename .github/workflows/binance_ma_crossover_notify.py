@@ -8,9 +8,9 @@ import traceback
 
 # --- CONFIGURATION ---
 
-EXCHANGE_ID = 'kraken'   # or 'kucoin' if you prefer
+EXCHANGE_ID = 'kraken'   # or 'kucoin'
 INTERVAL = '15m'
-LOOKBACK = 288           # 3 days approx
+LOOKBACK = 96            # 1 day (96 * 15min = 24 hours)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -89,7 +89,7 @@ def fetch_ohlcv(symbol, timeframe, limit):
     return df
 
 def get_eur_usd_from_usdt_pairs(timeframe, limit):
-    # Fetch USDT/USD and USDT/EUR data
+    # Fetch USDT/USD and USDT/EUR OHLCV data
     df_usdt_usd = fetch_ohlcv('USDT/USD', timeframe, limit)
     df_usdt_eur = fetch_ohlcv('USDT/EUR', timeframe, limit)
 
@@ -102,7 +102,7 @@ def get_eur_usd_from_usdt_pairs(timeframe, limit):
     df['low'] = df['low_usd'] / df['low_eur']
     df['close'] = df['close_usd'] / df['close_eur']
 
-    # Volume: approximate by USDT/USD volume or average (optional)
+    # Volume: average of both volumes as proxy
     df['volume'] = (df['volume_usd'] + df['volume_eur']) / 2
 
     # Keep only relevant columns
@@ -110,7 +110,7 @@ def get_eur_usd_from_usdt_pairs(timeframe, limit):
 
     return df
 
-# --- BACKTEST FUNCTION (with net PnL example) ---
+# --- BACKTEST FUNCTION WITH NET PnL ---
 
 def backtest(df):
     signals = []
@@ -133,7 +133,7 @@ def backtest(df):
             if "No clear" not in trend:
                 wr_signals.append(f"WR{period}: {trend}")
 
-        # Simple trade logic example:
+        # Simple trade logic: enter long on Uptrend, exit on Downtrend
         if position is None and stoch_trend == "Uptrend":
             position = {'entry_price': window['close'].iloc[-1]}
         elif position is not None and stoch_trend == "Downtrend":
@@ -171,7 +171,7 @@ def send_telegram_message(message):
     resp = requests.post(url, json=payload)
     resp.raise_for_status()
 
-# --- MAIN ---
+# --- MAIN LOGIC ---
 
 def main():
     dt = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
