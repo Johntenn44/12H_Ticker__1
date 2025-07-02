@@ -3,7 +3,6 @@ import ccxt
 import pandas as pd
 import numpy as np
 import requests
-import time
 from datetime import datetime
 import traceback
 
@@ -154,29 +153,28 @@ def check_signal(df):
     else:
         return None
 
-# --- MAIN LOOP ---
+# --- MAIN FUNCTION (RUN ONCE) ---
 
 def main():
-    while True:
-        print(f"Checking signals at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        df = fetch_latest_ohlcv()
-        if df is None or df.empty:
-            print("No data fetched, retrying in 5 minutes...")
-            time.sleep(300)
-            continue
+    print(f"Checking signals at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    df = fetch_latest_ohlcv()
+    if df is None or df.empty:
+        print("No data fetched, exiting.")
+        return
 
-        signal = check_signal(df)
-        if signal == "buy":
-            last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-            message = f"<b>Buy Signal Prime Detected for EUR/USD</b>\nTime: {last_close_time}\nIndicators aligned for buy."
-            send_telegram_message(message)
-        elif signal == "sell":
-            last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-            message = f"<b>Sell Signal Prime Detected for EUR/USD</b>\nTime: {last_close_time}\nIndicators aligned for sell."
-            send_telegram_message(message)
-        else:
-            print("Prime No clear buy or sell signal detected.")
-
+    signal = check_signal(df)
+    if signal == "buy":
+        last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
+        # Added emojis: 🚀 for buy
+        message = f"🚀 <b>Buy Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n✅ Indicators aligned for buy."
+        send_telegram_message(message)
+    elif signal == "sell":
+        last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
+        # Added emojis: 🔥 and ⚠️ for sell
+        message = f"🔥 <b>Sell Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n⚠️ Indicators aligned for sell."
+        send_telegram_message(message)
+    else:
+        print("No clear buy or sell signal detected.")
 
 if __name__ == "__main__":
     main()
