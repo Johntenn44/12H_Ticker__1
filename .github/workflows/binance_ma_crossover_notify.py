@@ -126,9 +126,9 @@ def check_signal(df):
     else:
         return None
 
-# --- FETCH HISTORICAL OHLCV DATA ---
+# --- FETCH OHLCV DATA ---
 
-def fetch_historical_ohlcv(symbol='EUR/USD', timeframe='15m', limit=1000):
+def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', limit=1000):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
@@ -142,49 +142,63 @@ def fetch_historical_ohlcv(symbol='EUR/USD', timeframe='15m', limit=1000):
         traceback.print_exc()
         return None
 
-# --- BACKTEST SIGNAL PERSISTENCE ---
+# --- HIGHER TIMEFRAME TREND (1H EMA CROSSOVER) ---
 
-def backtest_signal_persistence(df, persistence_candles=[1,2]):
-    results = {p: {'buy_success':0, 'buy_total':0, 'sell_success':0, 'sell_total':0} for p in persistence_candles}
-    
-    for i in range(50, len(df) - max(persistence_candles) - 1):
-        window_df = df.iloc[:i+1]
-        signal = check_signal(window_df)
-        if signal in ['buy', 'sell']:
-            close_price = df['close'].iloc[i]
-            for p in persistence_candles:
-                future_closes = df['close'].iloc[i+1:i+1+p]
-                if len(future_closes) < p:
-                    continue
-                
-                if signal == 'buy':
-                    if all(future_closes > close_price):
-                        results[p]['buy_success'] += 1
-                    results[p]['buy_total'] += 1
-                elif signal == 'sell':
-                    if all(future_closes < close_price):
-                        results[p]['sell_success'] += 1
-                    results[p]['sell_total'] += 1
+def fetch_higher_ohlcv(symbol='EUR/USD', timeframe='1h', limit=500):
+    try:
+        exchange = ccxt.kraken()
+        exchange.load_markets()
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        return df.astype(float)
+    except Exception as e:
+        print(f"Error fetching higher timeframe OHLCV data: {e}")
+        traceback.print_exc()
+        return None
 
-    for p in persistence_candles:
-        buy_rate = (results[p]['buy_success'] / results[p]['buy_total'] * 100) if results[p]['buy_total'] > 0 else 0
-        sell_rate = (results[p]['sell_success'] / results[p]['sell_total'] * 100) if results[p]['sell_total'] > 0 else 0
-        print(f"Persistence {p} candle(s):")
-        print(f"  Buy signals: {results[p]['buy_total']} total, {results[p]['buy_success']} successful ({buy_rate:.2f}%)")
-        print(f"  Sell signals: {results[p]['sell_total']} total, {results[p]['sell_success']} successful ({sell_rate:.2f}%)")
-        print("")
+def higher_timeframe_trend(df_higher):
+    ema50 = df_higher['close'].ewm(span=50, adjust=False).mean()
+    ema200 = df_higher['close'].ewm(span=200, adjust=False).mean()
+    if ema50.iloc[-1] > ema200.iloc[-1]:
+        return "up"
+    elif ema50.iloc[-1] < ema200.iloc[-1]:
+        return "down"
+    else:
+        return None
+
+# --- SIGNAL CHECK WITH HTF FILTER ---
+
+def check_signal_with_htf_filter(df_15m, htf_trend):
+    signal = check_signal(df_15m)
+    if signal is None or htf_trend is None:
+        return None
+    if signal == "buy" and htf_trend == "up":
+        return "buy"
+    elif signal == "sell" and htf_trend == "down":
+        return "sell"
+    else:
+        return None
 
 # --- MAIN FUNCTION ---
 
 def main():
-    print(f"Fetching historical data at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')} ...")
-    df = fetch_historical_ohlcv()
-    if df is None or df.empty:
-        print("Failed to fetch data for backtest.")
+    print(f"Fetching data at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')} ...")
+    df_15m = fetch_ohlcv()
+    df_1h = fetch_higher_ohlcv()
+    if df_15m is None or df_15m.empty or df_1h is None or df_1h.empty:
+        print("Failed to fetch data.")
         return
-    print(f"Data fetched: {len(df)} candles.")
-    print("Starting backtest for signal persistence...")
-    backtest_signal_persistence(df)
+    htf_trend = higher_timeframe_trend(df_1h)
+    signal = check_signal_with_htf_filter(df_15m, htf_trend)
+    last_close_time = df_15m.index[-1].strftime('%Y-%m-%d %H:%M UTC')
+    if signal == "buy":
+        print(f"🚀 Buy Signal confirmed by 1h trend at {last_close_time}")
+    elif signal == "sell":
+        print(f"🔥 Sell Signal confirmed by 1h trend at {last_close_time}")
+    else:
+        print(f"No confirmed signal at {last_close_time}")
 
 if __name__ == "__main__":
     main()
