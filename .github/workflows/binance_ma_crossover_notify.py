@@ -49,10 +49,8 @@ def analyze_wr_relative_positions(wr_dict):
     except (KeyError, IndexError):
         return None
 
-    # Uptrend: WR(8) and WR(3) > WR(233) and WR(144)
     if wr_8 > wr_233 and wr_3 > wr_233 and wr_8 > wr_144 and wr_3 > wr_144:
         return "up"
-    # Downtrend: WR(8) and WR(3) < WR(55)
     elif wr_8 < wr_55 and wr_3 < wr_55:
         return "down"
     else:
@@ -146,36 +144,32 @@ def fetch_historical_ohlcv(symbol='EUR/USD', timeframe='15m', limit=1000):
 
 # --- BACKTEST SIGNAL PERSISTENCE ---
 
-def backtest_signal_persistence(df, persistence_candles=[3,4]):
+def backtest_signal_persistence(df, persistence_candles=[1,2]):
     results = {p: {'buy_success':0, 'buy_total':0, 'sell_success':0, 'sell_total':0} for p in persistence_candles}
     
-    # Iterate over dataframe starting from index where indicators can be calculated
-    for i in range(50, len(df) - max(persistence_candles) - 1):  # 50 to ensure indicator windows are valid
-        window_df = df.iloc[:i+1]  # data up to current candle
+    for i in range(50, len(df) - max(persistence_candles) - 1):
+        window_df = df.iloc[:i+1]
         signal = check_signal(window_df)
         if signal in ['buy', 'sell']:
             close_price = df['close'].iloc[i]
             for p in persistence_candles:
                 future_closes = df['close'].iloc[i+1:i+1+p]
                 if len(future_closes) < p:
-                    continue  # Not enough future data
+                    continue
                 
                 if signal == 'buy':
-                    # Check if price stayed above the signal close for all next p candles
                     if all(future_closes > close_price):
                         results[p]['buy_success'] += 1
                     results[p]['buy_total'] += 1
                 elif signal == 'sell':
-                    # Check if price stayed below the signal close for all next p candles
                     if all(future_closes < close_price):
                         results[p]['sell_success'] += 1
                     results[p]['sell_total'] += 1
 
-    # Calculate success rates
     for p in persistence_candles:
         buy_rate = (results[p]['buy_success'] / results[p]['buy_total'] * 100) if results[p]['buy_total'] > 0 else 0
         sell_rate = (results[p]['sell_success'] / results[p]['sell_total'] * 100) if results[p]['sell_total'] > 0 else 0
-        print(f"Persistence {p} candles:")
+        print(f"Persistence {p} candle(s):")
         print(f"  Buy signals: {results[p]['buy_total']} total, {results[p]['buy_success']} successful ({buy_rate:.2f}%)")
         print(f"  Sell signals: {results[p]['sell_total']} total, {results[p]['sell_success']} successful ({sell_rate:.2f}%)")
         print("")
