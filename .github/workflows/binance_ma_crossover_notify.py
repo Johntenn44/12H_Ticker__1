@@ -177,7 +177,6 @@ def main():
         else:
             print("Prime No clear buy or sell signal detected.")
 
-        time.sleep(300)  # wait 5 minutes before next check
 
 if __name__ == "__main__":
     main()
