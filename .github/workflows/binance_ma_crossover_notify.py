@@ -1,10 +1,30 @@
 import ccxt
 import pandas as pd
 import numpy as np
-import traceback
-from datetime import datetime, timedelta
+import os
+import time
+import requests
+from datetime import datetime
 
-# --- Indicator functions ---
+# --- Telegram notification ---
+def send_telegram_message(message):
+    TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+    TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram credentials are missing!")
+        return
+    url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
+    payload = {
+        'chat_id': TELEGRAM_CHAT_ID,
+        'text': message,
+        'parse_mode': 'HTML'
+    }
+    try:
+        requests.post(url, data=payload, timeout=10)
+    except Exception as e:
+        print(f"Failed to send Telegram message: {e}")
+
+# --- Indicator functions (same as before) ---
 
 def calculate_rsi(series, period=13):
     delta = series.diff()
@@ -155,134 +175,50 @@ def check_signal(df):
     else:
         return None
 
-def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=350):
+def fetch_latest_ohlcv(symbol='EUR/USD', timeframe='15m', limit=100):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
-        since_ms = int(since.timestamp() * 1000) if since else None
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=limit)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         return df.astype(float)
     except Exception as e:
         print(f"Error fetching OHLCV data: {e}")
-        traceback.print_exc()
         return None
-
-def fetch_higher_ohlcv(symbol='EUR/USD', timeframe='1h', since=None, limit=100):
-    try:
-        exchange = ccxt.kraken()
-        exchange.load_markets()
-        since_ms = int(since.timestamp() * 1000) if since else None
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        return df.astype(float)
-    except Exception as e:
-        print(f"Error fetching higher timeframe OHLCV data: {e}")
-        traceback.print_exc()
-        return None
-
-def fetch_higher_ohlcv_4h(symbol='EUR/USD', timeframe='4h', since=None, limit=30):
-    try:
-        exchange = ccxt.kraken()
-        exchange.load_markets()
-        since_ms = int(since.timestamp() * 1000) if since else None
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        return df.astype(float)
-    except Exception as e:
-        print(f"Error fetching 4h OHLCV data: {e}")
-        traceback.print_exc()
-        return None
-
-def higher_timeframe_trend(df_higher):
-    ema50 = df_higher['close'].ewm(span=50, adjust=False).mean()
-    ema200 = df_higher['close'].ewm(span=200, adjust=False).mean()
-    if ema50.iloc[-1] > ema200.iloc[-1]:
-        return "up"
-    elif ema50.iloc[-1] < ema200.iloc[-1]:
-        return "down"
-    else:
-        return None
-
-def check_signal_with_multi_htf(df_15m, trend_1h, trend_4h):
-    signal = check_signal(df_15m)
-    if signal is None or trend_1h is None or trend_4h is None:
-        return None
-    if signal == "buy" and trend_1h == "up" and trend_4h == "up":
-        return "buy"
-    elif signal == "sell" and (trend_1h == "down" or trend_4h == "down"):
-        return "sell"
-    else:
-        return None
-
-def backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h, persistence_lengths=[1, 2, 3, 4]):
-    results = {p: {'buy_success': 0, 'buy_total': 0, 'sell_success': 0, 'sell_total': 0} for p in persistence_lengths}
-
-    trend_1h = higher_timeframe_trend(df_1h)
-    trend_4h = higher_timeframe_trend(df_4h)
-
-    for i in range(50, len(df_15m) - max(persistence_lengths) - 1):
-        timestamp = df_15m.index[i]
-        hour = timestamp.hour
-        # Skip trades between 11 PM and 6 AM
-        if hour >= 23 or hour < 6:
-            continue
-
-        window_df = df_15m.iloc[:i + 1]
-        signal = check_signal_with_multi_htf(window_df, trend_1h, trend_4h)
-        if signal in ['buy', 'sell']:
-            signal_close = df_15m['close'].iloc[i]
-            print(f"Signal: {signal.upper()} at {timestamp} (Price: {signal_close})")  # Print time of entry
-            for p in persistence_lengths:
-                future_closes = df_15m['close'].iloc[i + 1:i + 1 + p]
-                if len(future_closes) < p:
-                    continue
-                if signal == 'buy':
-                    if all(future_closes > signal_close):
-                        results[p]['buy_success'] += 1
-                    results[p]['buy_total'] += 1
-                elif signal == 'sell':
-                    if all(future_closes < signal_close):
-                        results[p]['sell_success'] += 1
-                    results[p]['sell_total'] += 1
-
-    for p in persistence_lengths:
-        buy_total = results[p]['buy_total']
-        sell_total = results[p]['sell_total']
-        buy_success = results[p]['buy_success']
-        sell_success = results[p]['sell_success']
-        buy_rate = (buy_success / buy_total * 100) if buy_total > 0 else 0
-        sell_rate = (sell_success / sell_total * 100) if sell_total > 0 else 0
-        print(f"Persistence {p} candle(s):")
-        print(f"  Buy signals: {buy_total} total, {buy_success} successful ({buy_rate:.2f}%)")
-        print(f"  Sell signals: {sell_total} total, {sell_success} successful ({sell_rate:.2f}%)")
-        print("")
 
 def main():
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=3)  # Backtest past 3 days
+    while True:
+        print(f"Checking signals at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        df = fetch_latest_ohlcv()
+        if df is None or df.empty:
+            print("No data fetched, retrying in 5 minutes...")
+            time.sleep(300)
+            continue
 
-    print(f"Fetching 15m data from {start_time} to {end_time} ...")
-    df_15m = fetch_ohlcv('EUR/USD', '15m', since=start_time, limit=350)
+        # Filter out signals between 11 PM and 6 AM
+        last_time = df.index[-1]
+        if last_time.hour >= 23 or last_time.hour < 6:
+            print("Signal detected outside trading hours (11 PM - 6 AM). Skipping.")
+            time.sleep(300)
+            continue
 
-    print(f"Fetching 1h data from {start_time} to {end_time} ...")
-    df_1h = fetch_higher_ohlcv('EUR/USD', '1h', since=start_time, limit=100)
+        signal = check_signal(df)
+        if signal == "buy":
+            last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
+            message = f"🚀 <b>Buy Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n✅ Majority indicators aligned for buy."
+            send_telegram_message(message)
+            print(message)
+        elif signal == "sell":
+            last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
+            message = f"🔥 <b>Sell Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n⚠️ Majority indicators aligned for sell."
+            send_telegram_message(message)
+            print(message)
+        else:
+            print("No clear buy or sell signal detected.")
 
-    print(f"Fetching 4h data from {start_time} to {end_time} ...")
-    df_4h = fetch_higher_ohlcv_4h('EUR/USD', '4h', since=start_time, limit=30)
-
-    if df_15m is None or df_15m.empty or df_1h is None or df_1h.empty or df_4h is None or df_4h.empty:
-        print("Failed to fetch required data for 3-day backtest.")
-        return
-
-    print(f"Running backtest for last 3 days with multi-indicator, multi-timeframe confirmation, and time filter...")
-    backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h)
+        time.sleep(300)  # wait 5 minutes before next check
 
 if __name__ == "__main__":
     main()
