@@ -124,13 +124,13 @@ def check_signal(df):
 
 # --- Fetch OHLCV ---
 
-def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=1000):
+def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=2000):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
         since_ms = int(since.timestamp() * 1000) if since else None
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         return df.astype(float)
@@ -139,13 +139,13 @@ def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=1000):
         traceback.print_exc()
         return None
 
-def fetch_higher_ohlcv(symbol='EUR/USD', timeframe='1h', since=None, limit=500):
+def fetch_higher_ohlcv(symbol='EUR/USD', timeframe='1h', since=None, limit=700):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
         since_ms = int(since.timestamp() * 1000) if since else None
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         return df.astype(float)
@@ -154,13 +154,13 @@ def fetch_higher_ohlcv(symbol='EUR/USD', timeframe='1h', since=None, limit=500):
         traceback.print_exc()
         return None
 
-def fetch_higher_ohlcv_4h(symbol='EUR/USD', timeframe='4h', since=None, limit=200):
+def fetch_higher_ohlcv_4h(symbol='EUR/USD', timeframe='4h', since=None, limit=300):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
         since_ms = int(since.timestamp() * 1000) if since else None
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         return df.astype(float)
@@ -181,16 +181,17 @@ def higher_timeframe_trend(df_higher):
     else:
         return None
 
-# --- Check signal with 1h and 4h trend confirmation ---
+# --- Check signal with multi-timeframe trend confirmation ---
 
 def check_signal_with_multi_htf(df_15m, trend_1h, trend_4h):
     signal = check_signal(df_15m)
     if signal is None or trend_1h is None or trend_4h is None:
         return None
-    # Confirm signal only if it aligns with both 1h and 4h trends
+    # Buy requires both 1h and 4h uptrend
     if signal == "buy" and trend_1h == "up" and trend_4h == "up":
         return "buy"
-    elif signal == "sell" and trend_1h == "down" and trend_4h == "down":
+    # Sell requires either 1h or 4h downtrend
+    elif signal == "sell" and (trend_1h == "down" or trend_4h == "down"):
         return "sell"
     else:
         return None
@@ -198,7 +199,7 @@ def check_signal_with_multi_htf(df_15m, trend_1h, trend_4h):
 # --- Backtest signal persistence with multi-timeframe trend confirmation ---
 
 def backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h, persistence_lengths=[1,2,3,4]):
-    results = {p: {'buy_success':0, 'buy_total':0, 'sell_success':0, 'sell_total':0} for p in persistence_lengths}
+    results = {p: {'buy_success': 0, 'buy_total': 0, 'sell_success': 0, 'sell_total': 0} for p in persistence_lengths}
 
     trend_1h = higher_timeframe_trend(df_1h)
     trend_4h = higher_timeframe_trend(df_4h)
@@ -237,7 +238,7 @@ def backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h, persistence
 
 def main():
     end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=5)  # 5 days backtest period
+    start_time = end_time - timedelta(days=5)  # 5-day backtest period
 
     print(f"Fetching 15m data from {start_time} to {end_time} ...")
     df_15m = fetch_ohlcv('EUR/USD', '15m', since=start_time, limit=2000)
@@ -252,7 +253,7 @@ def main():
         print("Failed to fetch required data.")
         return
 
-    print(f"Running backtest for last 5 days with 1h and 4h trend confirmation...")
+    print(f"Running backtest for last 5 days with 1h and 4h trend confirmation (sell signals require either timeframe down)...")
     backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h)
 
 if __name__ == "__main__":
