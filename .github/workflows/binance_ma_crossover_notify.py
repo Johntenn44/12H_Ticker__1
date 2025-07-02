@@ -139,14 +139,60 @@ def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=1000):
         traceback.print_exc()
         return None
 
-# --- Backtest signal persistence ---
+# --- Fetch higher timeframe OHLCV for trend confirmation ---
 
-def backtest_signal_persistence_with_lengths(df_15m, persistence_lengths=[1,2,3,4]):
+def fetch_higher_ohlcv(symbol='EUR/USD', timeframe='1h', since=None, limit=500):
+    try:
+        exchange = ccxt.kraken()
+        exchange.load_markets()
+        since_ms = int(since.timestamp() * 1000) if since else None
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        return df.astype(float)
+    except Exception as e:
+        print(f"Error fetching higher timeframe OHLCV data: {e}")
+        traceback.print_exc()
+        return None
+
+# --- Higher timeframe trend calculation (EMA50/EMA200 crossover) ---
+
+def higher_timeframe_trend(df_higher):
+    ema50 = df_higher['close'].ewm(span=50, adjust=False).mean()
+    ema200 = df_higher['close'].ewm(span=200, adjust=False).mean()
+    if ema50.iloc[-1] > ema200.iloc[-1]:
+        return "up"
+    elif ema50.iloc[-1] < ema200.iloc[-1]:
+        return "down"
+    else:
+        return None
+
+# --- Check signal with 1h and 4h trend confirmation ---
+
+def check_signal_with_multi_htf(df_15m, trend_1h, trend_4h):
+    signal = check_signal(df_15m)
+    if signal is None or trend_1h is None or trend_4h is None:
+        return None
+    # Confirm signal only if it aligns with both 1h and 4h trends
+    if signal == "buy" and trend_1h == "up" and trend_4h == "up":
+        return "buy"
+    elif signal == "sell" and trend_1h == "down" and trend_4h == "down":
+        return "sell"
+    else:
+        return None
+
+# --- Backtest signal persistence with multi-timeframe trend confirmation ---
+
+def backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h, persistence_lengths=[1,2,3,4]):
     results = {p: {'buy_success':0, 'buy_total':0, 'sell_success':0, 'sell_total':0} for p in persistence_lengths}
+
+    trend_1h = higher_timeframe_trend(df_1h)
+    trend_4h = higher_timeframe_trend(df_4h)
 
     for i in range(50, len(df_15m) - max(persistence_lengths) - 1):
         window_df = df_15m.iloc[:i+1]
-        signal = check_signal(window_df)
+        signal = check_signal_with_multi_htf(window_df, trend_1h, trend_4h)
         if signal in ['buy', 'sell']:
             signal_close = df_15m['close'].iloc[i]
             for p in persistence_lengths:
@@ -183,12 +229,18 @@ def main():
     print(f"Fetching 15m data from {start_time} to {end_time} ...")
     df_15m = fetch_ohlcv('EUR/USD', '15m', since=start_time, limit=1000)
 
-    if df_15m is None or df_15m.empty:
-        print("Failed to fetch 15m data.")
+    print(f"Fetching 1h data from {start_time} to {end_time} ...")
+    df_1h = fetch_higher_ohlcv('EUR/USD', '1h', since=start_time, limit=500)
+
+    print(f"Fetching 4h data from {start_time} to {end_time} ...")
+    df_4h = fetch_higher_ohlcv('EUR/USD', '4h', since=start_time, limit=200)
+
+    if df_15m is None or df_15m.empty or df_1h is None or df_1h.empty or df_4h is None or df_4h.empty:
+        print("Failed to fetch required data.")
         return
 
-    print(f"Running backtest for last 2 days with persistence check...")
-    backtest_signal_persistence_with_lengths(df_15m)
+    print(f"Running backtest for last 2 days with 1h and 4h trend confirmation...")
+    backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h)
 
 if __name__ == "__main__":
     main()
