@@ -139,41 +139,40 @@ def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=1000):
         traceback.print_exc()
         return None
 
-# --- Higher timeframe trend ---
+# --- Backtest signal persistence ---
 
-def higher_timeframe_trend(df_higher):
-    ema50 = df_higher['close'].ewm(span=50, adjust=False).mean()
-    ema200 = df_higher['close'].ewm(span=200, adjust=False).mean()
-    if ema50.iloc[-1] > ema200.iloc[-1]:
-        return "up"
-    elif ema50.iloc[-1] < ema200.iloc[-1]:
-        return "down"
-    else:
-        return None
+def backtest_signal_persistence_with_lengths(df_15m, persistence_lengths=[1,2,3,4]):
+    results = {p: {'buy_success':0, 'buy_total':0, 'sell_success':0, 'sell_total':0} for p in persistence_lengths}
 
-def check_signal_with_htf_filter(df_15m, htf_trend):
-    signal = check_signal(df_15m)
-    if signal is None or htf_trend is None:
-        return None
-    if signal == "buy" and htf_trend == "up":
-        return "buy"
-    elif signal == "sell" and htf_trend == "down":
-        return "sell"
-    else:
-        return None
-
-# --- Backtest over 2 days ---
-
-def backtest_over_period(df_15m, df_1h):
-    htf_trend = higher_timeframe_trend(df_1h)
-    results = []
-    for i in range(50, len(df_15m)):
+    for i in range(50, len(df_15m) - max(persistence_lengths) - 1):
         window_df = df_15m.iloc[:i+1]
-        signal = check_signal_with_htf_filter(window_df, htf_trend)
-        timestamp = df_15m.index[i]
-        results.append({'timestamp': timestamp, 'signal': signal})
-        print(f"{timestamp} - Signal: {signal}")
-    return pd.DataFrame(results)
+        signal = check_signal(window_df)
+        if signal in ['buy', 'sell']:
+            signal_close = df_15m['close'].iloc[i]
+            for p in persistence_lengths:
+                future_closes = df_15m['close'].iloc[i+1:i+1+p]
+                if len(future_closes) < p:
+                    continue
+                if signal == 'buy':
+                    if all(future_closes > signal_close):
+                        results[p]['buy_success'] += 1
+                    results[p]['buy_total'] += 1
+                elif signal == 'sell':
+                    if all(future_closes < signal_close):
+                        results[p]['sell_success'] += 1
+                    results[p]['sell_total'] += 1
+
+    for p in persistence_lengths:
+        buy_total = results[p]['buy_total']
+        sell_total = results[p]['sell_total']
+        buy_success = results[p]['buy_success']
+        sell_success = results[p]['sell_success']
+        buy_rate = (buy_success / buy_total * 100) if buy_total > 0 else 0
+        sell_rate = (sell_success / sell_total * 100) if sell_total > 0 else 0
+        print(f"Persistence {p} candle(s):")
+        print(f"  Buy signals: {buy_total} total, {buy_success} successful ({buy_rate:.2f}%)")
+        print(f"  Sell signals: {sell_total} total, {sell_success} successful ({sell_rate:.2f}%)")
+        print("")
 
 # --- Main ---
 
@@ -183,15 +182,13 @@ def main():
 
     print(f"Fetching 15m data from {start_time} to {end_time} ...")
     df_15m = fetch_ohlcv('EUR/USD', '15m', since=start_time, limit=1000)
-    print(f"Fetching 1h data from {start_time} to {end_time} ...")
-    df_1h = fetch_ohlcv('EUR/USD', '1h', since=start_time, limit=500)
 
-    if df_15m is None or df_15m.empty or df_1h is None or df_1h.empty:
-        print("Failed to fetch data for backtest.")
+    if df_15m is None or df_15m.empty:
+        print("Failed to fetch 15m data.")
         return
 
-    print(f"Running backtest for last 2 days...")
-    backtest_results = backtest_over_period(df_15m, df_1h)
+    print(f"Running backtest for last 2 days with persistence check...")
+    backtest_signal_persistence_with_lengths(df_15m)
 
 if __name__ == "__main__":
     main()
