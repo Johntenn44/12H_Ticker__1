@@ -1,53 +1,30 @@
-import os
 import ccxt
 import pandas as pd
 import numpy as np
-import requests
+import os
 import time
+import requests
 from datetime import datetime
-import traceback
-from keep_alive import keep_alive
 
-keep_alive()
-
-# --- TELEGRAM CONFIGURATION ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-    raise ValueError("Telegram bot token or chat ID not set in environment variables.")
-
+# --- Telegram notification ---
 def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+    TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram credentials are missing!")
+        return
+    url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML"
+        'chat_id': TELEGRAM_CHAT_ID,
+        'text': message,
+        'parse_mode': 'HTML'
     }
     try:
-        resp = requests.post(url, data=payload)
-        resp.raise_for_status()
-        print(f"Telegram message sent: {message}")
+        requests.post(url, data=payload, timeout=10)
     except Exception as e:
         print(f"Failed to send Telegram message: {e}")
 
-# --- FETCH OHLCV DATA ---
-
-def fetch_latest_ohlcv(symbol='EUR/USD', timeframe='15m', limit=100):
-    try:
-        exchange = ccxt.kraken()
-        exchange.load_markets()
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        return df.astype(float)
-    except Exception as e:
-        print(f"Error fetching OHLCV data: {e}")
-        traceback.print_exc()
-        return None
-
-# --- INDICATOR CALCULATIONS ---
+# --- Indicator functions (same as before) ---
 
 def calculate_rsi(series, period=13):
     delta = series.diff()
@@ -92,10 +69,8 @@ def analyze_wr_relative_positions(wr_dict):
     except (KeyError, IndexError):
         return None
 
-    # Uptrend: WR(8) and WR(3) > WR(233) and WR(144)
     if wr_8 > wr_233 and wr_3 > wr_233 and wr_8 > wr_144 and wr_3 > wr_144:
         return "up"
-    # Downtrend: WR(8) and WR(3) < WR(55)
     elif wr_8 < wr_55 and wr_3 < wr_55:
         return "down"
     else:
@@ -109,8 +84,6 @@ def calculate_kdj(df, length=5, ma1=8, ma2=8):
     d = k.ewm(span=ma2, adjust=False).mean()
     j = 3 * k - 2 * d
     return k, d, j
-
-# --- TREND ANALYSIS FUNCTIONS ---
 
 def analyze_stoch_rsi_trend(k, d):
     if len(k) < 2 or pd.isna(k.iloc[-2]) or pd.isna(d.iloc[-2]) or pd.isna(k.iloc[-1]) or pd.isna(d.iloc[-1]):
@@ -143,7 +116,19 @@ def analyze_kdj_trend(k, d, j):
     else:
         return None
 
-# --- SIGNAL CHECK (MAJORITY VOTING) ---
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line, signal_line
+
+def calculate_bollinger_bands(close, window=20, num_std=2):
+    sma = close.rolling(window=window).mean()
+    std = close.rolling(window=window).std()
+    upper_band = sma + (std * num_std)
+    lower_band = sma - (std * num_std)
+    return upper_band, lower_band
 
 def check_signal(df):
     k, d = calculate_stoch_rsi(df)
@@ -161,6 +146,25 @@ def check_signal(df):
 
     signals = [stoch_trend, wr_trend, rsi_trend, kdj_trend]
 
+    macd_line, macd_signal = calculate_macd(df['close'])
+    macd_trend = None
+    if len(macd_line) > 1 and macd_line.iloc[-2] < macd_signal.iloc[-2] and macd_line.iloc[-1] > macd_signal.iloc[-1]:
+        macd_trend = "up"
+    elif len(macd_line) > 1 and macd_line.iloc[-2] > macd_signal.iloc[-2] and macd_line.iloc[-1] < macd_signal.iloc[-1]:
+        macd_trend = "down"
+    if macd_trend:
+        signals.append(macd_trend)
+
+    upper_band, lower_band = calculate_bollinger_bands(df['close'])
+    price = df['close'].iloc[-1]
+    bb_trend = None
+    if price < lower_band.iloc[-1]:
+        bb_trend = "up"
+    elif price > upper_band.iloc[-1]:
+        bb_trend = "down"
+    if bb_trend:
+        signals.append(bb_trend)
+
     up_signals = signals.count("up")
     down_signals = signals.count("down")
 
@@ -171,7 +175,18 @@ def check_signal(df):
     else:
         return None
 
-# --- MAIN LOOP (RUN EVERY 5 MINUTES) ---
+def fetch_latest_ohlcv(symbol='EUR/USD', timeframe='15m', limit=100):
+    try:
+        exchange = ccxt.kraken()
+        exchange.load_markets()
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        return df.astype(float)
+    except Exception as e:
+        print(f"Error fetching OHLCV data: {e}")
+        return None
 
 def main():
     while True:
@@ -182,15 +197,24 @@ def main():
             time.sleep(300)
             continue
 
+        # Filter out signals between 11 PM and 6 AM
+        last_time = df.index[-1]
+        if last_time.hour >= 23 or last_time.hour < 6:
+            print("Signal detected outside trading hours (11 PM - 6 AM). Skipping.")
+            time.sleep(300)
+            continue
+
         signal = check_signal(df)
         if signal == "buy":
             last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
             message = f"🚀 <b>Buy Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n✅ Majority indicators aligned for buy."
             send_telegram_message(message)
+            print(message)
         elif signal == "sell":
             last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
             message = f"🔥 <b>Sell Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n⚠️ Majority indicators aligned for sell."
             send_telegram_message(message)
+            print(message)
         else:
             print("No clear buy or sell signal detected.")
 
