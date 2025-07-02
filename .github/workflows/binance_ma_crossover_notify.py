@@ -96,6 +96,26 @@ def analyze_kdj_trend(k, d, j):
     else:
         return None
 
+# --- New: MACD Calculation ---
+
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line, signal_line
+
+# --- New: Bollinger Bands Calculation ---
+
+def calculate_bollinger_bands(close, window=20, num_std=2):
+    sma = close.rolling(window=window).mean()
+    std = close.rolling(window=window).std()
+    upper_band = sma + (std * num_std)
+    lower_band = sma - (std * num_std)
+    return upper_band, lower_band
+
+# --- Enhanced check_signal with MACD and Bollinger Bands ---
+
 def check_signal(df):
     k, d = calculate_stoch_rsi(df)
     wr_dict = calculate_multi_wr(df)
@@ -112,6 +132,27 @@ def check_signal(df):
 
     signals = [stoch_trend, wr_trend, rsi_trend, kdj_trend]
 
+    # MACD confirmation
+    macd_line, macd_signal = calculate_macd(df['close'])
+    macd_trend = None
+    if len(macd_line) > 1 and macd_line.iloc[-2] < macd_signal.iloc[-2] and macd_line.iloc[-1] > macd_signal.iloc[-1]:
+        macd_trend = "up"
+    elif len(macd_line) > 1 and macd_line.iloc[-2] > macd_signal.iloc[-2] and macd_line.iloc[-1] < macd_signal.iloc[-1]:
+        macd_trend = "down"
+    if macd_trend:
+        signals.append(macd_trend)
+
+    # Bollinger Bands confirmation
+    upper_band, lower_band = calculate_bollinger_bands(df['close'])
+    price = df['close'].iloc[-1]
+    bb_trend = None
+    if price < lower_band.iloc[-1]:
+        bb_trend = "up"    # price near lower band suggests buy
+    elif price > upper_band.iloc[-1]:
+        bb_trend = "down"  # price near upper band suggests sell
+    if bb_trend:
+        signals.append(bb_trend)
+
     up_signals = signals.count("up")
     down_signals = signals.count("down")
 
@@ -122,7 +163,7 @@ def check_signal(df):
     else:
         return None
 
-# --- Fetch OHLCV ---
+# --- Fetch OHLCV functions ---
 
 def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=2000):
     try:
@@ -253,7 +294,7 @@ def main():
         print("Failed to fetch required data.")
         return
 
-    print(f"Running backtest for last 5 days with 1h and 4h trend confirmation (sell signals require either timeframe down)...")
+    print(f"Running backtest for last 5 days with MACD, Bollinger Bands, and 1h/4h trend confirmation...")
     backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h)
 
 if __name__ == "__main__":
