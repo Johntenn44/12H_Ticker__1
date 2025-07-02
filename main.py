@@ -5,6 +5,11 @@ import os
 import time
 import requests
 from datetime import datetime
+import traceback
+from keep_alive import keep_alive
+
+keep_alive()
+
 
 # --- Telegram notification ---
 def send_telegram_message(message):
