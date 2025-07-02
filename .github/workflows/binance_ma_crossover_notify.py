@@ -96,8 +96,6 @@ def analyze_kdj_trend(k, d, j):
     else:
         return None
 
-# --- New: MACD Calculation ---
-
 def calculate_macd(close, fast=12, slow=26, signal=9):
     ema_fast = close.ewm(span=fast, adjust=False).mean()
     ema_slow = close.ewm(span=slow, adjust=False).mean()
@@ -105,16 +103,12 @@ def calculate_macd(close, fast=12, slow=26, signal=9):
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     return macd_line, signal_line
 
-# --- New: Bollinger Bands Calculation ---
-
 def calculate_bollinger_bands(close, window=20, num_std=2):
     sma = close.rolling(window=window).mean()
     std = close.rolling(window=window).std()
     upper_band = sma + (std * num_std)
     lower_band = sma - (std * num_std)
     return upper_band, lower_band
-
-# --- Enhanced check_signal with MACD and Bollinger Bands ---
 
 def check_signal(df):
     k, d = calculate_stoch_rsi(df)
@@ -132,7 +126,6 @@ def check_signal(df):
 
     signals = [stoch_trend, wr_trend, rsi_trend, kdj_trend]
 
-    # MACD confirmation
     macd_line, macd_signal = calculate_macd(df['close'])
     macd_trend = None
     if len(macd_line) > 1 and macd_line.iloc[-2] < macd_signal.iloc[-2] and macd_line.iloc[-1] > macd_signal.iloc[-1]:
@@ -142,14 +135,13 @@ def check_signal(df):
     if macd_trend:
         signals.append(macd_trend)
 
-    # Bollinger Bands confirmation
     upper_band, lower_band = calculate_bollinger_bands(df['close'])
     price = df['close'].iloc[-1]
     bb_trend = None
     if price < lower_band.iloc[-1]:
-        bb_trend = "up"    # price near lower band suggests buy
+        bb_trend = "up"
     elif price > upper_band.iloc[-1]:
-        bb_trend = "down"  # price near upper band suggests sell
+        bb_trend = "down"
     if bb_trend:
         signals.append(bb_trend)
 
@@ -162,8 +154,6 @@ def check_signal(df):
         return "sell"
     else:
         return None
-
-# --- Fetch OHLCV functions ---
 
 def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=2000):
     try:
@@ -210,8 +200,6 @@ def fetch_higher_ohlcv_4h(symbol='EUR/USD', timeframe='4h', since=None, limit=30
         traceback.print_exc()
         return None
 
-# --- Higher timeframe trend calculation (EMA50/EMA200 crossover) ---
-
 def higher_timeframe_trend(df_higher):
     ema50 = df_higher['close'].ewm(span=50, adjust=False).mean()
     ema200 = df_higher['close'].ewm(span=200, adjust=False).mean()
@@ -222,36 +210,36 @@ def higher_timeframe_trend(df_higher):
     else:
         return None
 
-# --- Check signal with multi-timeframe trend confirmation ---
-
 def check_signal_with_multi_htf(df_15m, trend_1h, trend_4h):
     signal = check_signal(df_15m)
     if signal is None or trend_1h is None or trend_4h is None:
         return None
-    # Buy requires both 1h and 4h uptrend
     if signal == "buy" and trend_1h == "up" and trend_4h == "up":
         return "buy"
-    # Sell requires either 1h or 4h downtrend
     elif signal == "sell" and (trend_1h == "down" or trend_4h == "down"):
         return "sell"
     else:
         return None
 
-# --- Backtest signal persistence with multi-timeframe trend confirmation ---
-
-def backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h, persistence_lengths=[1,2,3,4]):
+def backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h, persistence_lengths=[1, 2, 3, 4]):
     results = {p: {'buy_success': 0, 'buy_total': 0, 'sell_success': 0, 'sell_total': 0} for p in persistence_lengths}
 
     trend_1h = higher_timeframe_trend(df_1h)
     trend_4h = higher_timeframe_trend(df_4h)
 
     for i in range(50, len(df_15m) - max(persistence_lengths) - 1):
-        window_df = df_15m.iloc[:i+1]
+        timestamp = df_15m.index[i]
+        hour = timestamp.hour
+        # Skip trades between 11 PM and 6 AM
+        if hour >= 23 or hour < 6:
+            continue
+
+        window_df = df_15m.iloc[:i + 1]
         signal = check_signal_with_multi_htf(window_df, trend_1h, trend_4h)
         if signal in ['buy', 'sell']:
             signal_close = df_15m['close'].iloc[i]
             for p in persistence_lengths:
-                future_closes = df_15m['close'].iloc[i+1:i+1+p]
+                future_closes = df_15m['close'].iloc[i + 1:i + 1 + p]
                 if len(future_closes) < p:
                     continue
                 if signal == 'buy':
@@ -275,11 +263,9 @@ def backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h, persistence
         print(f"  Sell signals: {sell_total} total, {sell_success} successful ({sell_rate:.2f}%)")
         print("")
 
-# --- Main ---
-
 def main():
     end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=5)  # 5-day backtest period
+    start_time = end_time - timedelta(days=5)
 
     print(f"Fetching 15m data from {start_time} to {end_time} ...")
     df_15m = fetch_ohlcv('EUR/USD', '15m', since=start_time, limit=2000)
@@ -294,7 +280,7 @@ def main():
         print("Failed to fetch required data.")
         return
 
-    print(f"Running backtest for last 5 days with MACD, Bollinger Bands, and 1h/4h trend confirmation...")
+    print(f"Running backtest for last 5 days with multi-indicator, multi-timeframe confirmation, and time filter...")
     backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h)
 
 if __name__ == "__main__":
