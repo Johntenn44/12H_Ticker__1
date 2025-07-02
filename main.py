@@ -7,8 +7,8 @@ import time
 from datetime import datetime
 import traceback
 from keep_alive import keep_alive
-keep_alive()
 
+keep_alive()
 
 # --- TELEGRAM CONFIGURATION ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -71,13 +71,35 @@ def calculate_stoch_rsi(df, rsi_len=13, stoch_len=8, smooth_k=5, smooth_d=3):
     d = k.rolling(window=smooth_d).mean()
     return k, d
 
-def calculate_wr(df, length=14):
-    highest_high = df['high'].rolling(window=length).max()
-    lowest_low = df['low'].rolling(window=length).min()
-    denom = highest_high - lowest_low
-    denom = denom.replace(0, np.nan)
-    wr = (highest_high - df['close']) / denom * -100
-    return wr.fillna(method='ffill')
+def calculate_multi_wr(df, lengths=[3, 13, 144, 8, 233, 55]):
+    wr_dict = {}
+    for length in lengths:
+        highest_high = df['high'].rolling(window=length).max()
+        lowest_low = df['low'].rolling(window=length).min()
+        denom = highest_high - lowest_low
+        denom = denom.replace(0, np.nan)
+        wr = (highest_high - df['close']) / denom * -100
+        wr_dict[length] = wr.fillna(method='ffill')
+    return wr_dict
+
+def analyze_wr_relative_positions(wr_dict):
+    try:
+        wr_8 = wr_dict[8].iloc[-1]
+        wr_3 = wr_dict[3].iloc[-1]
+        wr_144 = wr_dict[144].iloc[-1]
+        wr_233 = wr_dict[233].iloc[-1]
+        wr_55 = wr_dict[55].iloc[-1]
+    except (KeyError, IndexError):
+        return None
+
+    # Uptrend: WR(8) and WR(3) > WR(233) and WR(144)
+    if wr_8 > wr_233 and wr_3 > wr_233 and wr_8 > wr_144 and wr_3 > wr_144:
+        return "up"
+    # Downtrend: WR(8) and WR(3) < WR(55)
+    elif wr_8 < wr_55 and wr_3 < wr_55:
+        return "down"
+    else:
+        return None
 
 def calculate_kdj(df, length=5, ma1=8, ma2=8):
     low_min = df['low'].rolling(window=length, min_periods=1).min()
@@ -100,21 +122,10 @@ def analyze_stoch_rsi_trend(k, d):
     else:
         return None
 
-def analyze_wr_trend(wr):
-    if len(wr) < 2 or pd.isna(wr.iloc[-2]) or pd.isna(wr.iloc[-1]):
-        return None
-    prev, curr = wr.iloc[-2], wr.iloc[-1]
-    if prev > -80 and curr <= -80:
+def analyze_rsi_trend(rsi5, rsi13, rsi21):
+    if rsi5 > rsi13 > rsi21:
         return "up"
-    elif prev < -20 and curr >= -20:
-        return "down"
-    else:
-        return None
-
-def analyze_rsi_trend(rsi8, rsi13, rsi21):
-    if rsi8 > rsi13 > rsi21:
-        return "up"
-    elif rsi8 < rsi13 < rsi21:
+    elif rsi5 < rsi13 < rsi21:
         return "down"
     else:
         return None
@@ -132,23 +143,24 @@ def analyze_kdj_trend(k, d, j):
     else:
         return None
 
-# --- SIGNAL CHECK ---
+# --- SIGNAL CHECK (MAJORITY VOTING) ---
 
 def check_signal(df):
     k, d = calculate_stoch_rsi(df)
-    wr = calculate_wr(df)
-    rsi8 = calculate_rsi(df['close'], 8).iloc[-1]
+    wr_dict = calculate_multi_wr(df)
+    wr_trend = analyze_wr_relative_positions(wr_dict)
+
+    rsi5 = calculate_rsi(df['close'], 5).iloc[-1]
     rsi13 = calculate_rsi(df['close'], 13).iloc[-1]
     rsi21 = calculate_rsi(df['close'], 21).iloc[-1]
     kdj_k, kdj_d, kdj_j = calculate_kdj(df)
 
     stoch_trend = analyze_stoch_rsi_trend(k, d)
-    wr_trend = analyze_wr_trend(wr)
-    rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
+    rsi_trend = analyze_rsi_trend(rsi5, rsi13, rsi21)
     kdj_trend = analyze_kdj_trend(kdj_k, kdj_d, kdj_j)
 
-    # Aggregate signals: buy if majority "up", sell if majority "down"
     signals = [stoch_trend, wr_trend, rsi_trend, kdj_trend]
+
     up_signals = signals.count("up")
     down_signals = signals.count("down")
 
@@ -159,7 +171,7 @@ def check_signal(df):
     else:
         return None
 
-# --- MAIN LOOP ---
+# --- MAIN LOOP (RUN EVERY 5 MINUTES) ---
 
 def main():
     while True:
@@ -173,11 +185,11 @@ def main():
         signal = check_signal(df)
         if signal == "buy":
             last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-            message = f"<b>Buy Signal Detected for EUR/USD</b>\nTime: {last_close_time}\nIndicators aligned for buy."
+            message = f"🚀 <b>Buy Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n✅ Majority indicators aligned for buy."
             send_telegram_message(message)
         elif signal == "sell":
             last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-            message = f"<b>Sell Signal Detected for EUR/USD</b>\nTime: {last_close_time}\nIndicators aligned for sell."
+            message = f"🔥 <b>Sell Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n⚠️ Majority indicators aligned for sell."
             send_telegram_message(message)
         else:
             print("No clear buy or sell signal detected.")
