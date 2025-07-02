@@ -6,6 +6,7 @@ import requests
 from datetime import datetime
 import traceback
 
+
 # --- TELEGRAM CONFIGURATION ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -67,13 +68,33 @@ def calculate_stoch_rsi(df, rsi_len=13, stoch_len=8, smooth_k=5, smooth_d=3):
     d = k.rolling(window=smooth_d).mean()
     return k, d
 
-def calculate_wr(df, length=14):
-    highest_high = df['high'].rolling(window=length).max()
-    lowest_low = df['low'].rolling(window=length).min()
-    denom = highest_high - lowest_low
-    denom = denom.replace(0, np.nan)
-    wr = (highest_high - df['close']) / denom * -100
-    return wr.fillna(method='ffill')
+def calculate_multi_wr(df, lengths=[3, 13, 144, 8, 233, 55]):
+    wr_dict = {}
+    for length in lengths:
+        highest_high = df['high'].rolling(window=length).max()
+        lowest_low = df['low'].rolling(window=length).min()
+        denom = highest_high - lowest_low
+        denom = denom.replace(0, np.nan)
+        wr = (highest_high - df['close']) / denom * -100
+        wr_dict[length] = wr.fillna(method='ffill')
+    return wr_dict
+
+def analyze_wr_relative_positions(wr_dict):
+    try:
+        wr_8 = wr_dict[8].iloc[-1]
+        wr_3 = wr_dict[3].iloc[-1]
+        wr_144 = wr_dict[144].iloc[-1]
+        wr_233 = wr_dict[233].iloc[-1]
+    except (KeyError, IndexError):
+        return None
+
+    # Example logic: ascending order means downtrend, descending means uptrend
+    if wr_8 > wr_3 > wr_144 > wr_233:
+        return "up"
+    elif wr_8 < wr_3 < wr_144 < wr_233:
+        return "down"
+    else:
+        return None
 
 def calculate_kdj(df, length=5, ma1=8, ma2=8):
     low_min = df['low'].rolling(window=length, min_periods=1).min()
@@ -92,17 +113,6 @@ def analyze_stoch_rsi_trend(k, d):
     if k.iloc[-2] < d.iloc[-2] and k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 80:
         return "up"
     elif k.iloc[-2] > d.iloc[-2] and k.iloc[-1] < d.iloc[-1] and k.iloc[-1] > 20:
-        return "down"
-    else:
-        return None
-
-def analyze_wr_trend(wr):
-    if len(wr) < 2 or pd.isna(wr.iloc[-2]) or pd.isna(wr.iloc[-1]):
-        return None
-    prev, curr = wr.iloc[-2], wr.iloc[-1]
-    if prev > -80 and curr <= -80:
-        return "up"
-    elif prev < -20 and curr >= -20:
         return "down"
     else:
         return None
@@ -132,20 +142,20 @@ def analyze_kdj_trend(k, d, j):
 
 def check_signal(df):
     k, d = calculate_stoch_rsi(df)
-    wr = calculate_wr(df)
+    wr_dict = calculate_multi_wr(df)
+    wr_trend = analyze_wr_relative_positions(wr_dict)
+
     rsi8 = calculate_rsi(df['close'], 8).iloc[-1]
     rsi13 = calculate_rsi(df['close'], 13).iloc[-1]
     rsi21 = calculate_rsi(df['close'], 21).iloc[-1]
     kdj_k, kdj_d, kdj_j = calculate_kdj(df)
 
     stoch_trend = analyze_stoch_rsi_trend(k, d)
-    wr_trend = analyze_wr_trend(wr)
     rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
     kdj_trend = analyze_kdj_trend(kdj_k, kdj_d, kdj_j)
 
     signals = [stoch_trend, wr_trend, rsi_trend, kdj_trend]
 
-    # Signal only if all indicators agree
     if all(signal == "up" for signal in signals):
         return "buy"
     elif all(signal == "down" for signal in signals):
@@ -165,12 +175,10 @@ def main():
     signal = check_signal(df)
     if signal == "buy":
         last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-        # Added emojis: 🚀 for buy
         message = f"🚀 <b>Buy Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n✅ Indicators aligned for buy."
         send_telegram_message(message)
     elif signal == "sell":
         last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-        # Added emojis: 🔥 and ⚠️ for sell
         message = f"🔥 <b>Sell Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n⚠️ Indicators aligned for sell."
         send_telegram_message(message)
     else:
