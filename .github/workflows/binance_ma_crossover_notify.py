@@ -3,7 +3,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 import traceback
 
 # --- TELEGRAM CONFIGURATION ---
@@ -118,10 +118,10 @@ def analyze_stoch_rsi_trend(k, d):
     else:
         return None
 
-def analyze_rsi_trend(rsi8, rsi13, rsi21):
-    if rsi8 > rsi13 > rsi21:
+def analyze_rsi_trend(rsi5, rsi13, rsi21):
+    if rsi5 > rsi13 > rsi21:
         return "up"
-    elif rsi8 < rsi13 < rsi21:
+    elif rsi5 < rsi13 < rsi21:
         return "down"
     else:
         return None
@@ -139,83 +139,54 @@ def analyze_kdj_trend(k, d, j):
     else:
         return None
 
-# --- SIGNAL CHECK (ALL INDICATORS MUST AGREE) ---
+# --- SIGNAL CHECK (MAJORITY VOTING) ---
 
 def check_signal(df):
     k, d = calculate_stoch_rsi(df)
     wr_dict = calculate_multi_wr(df)
     wr_trend = analyze_wr_relative_positions(wr_dict)
 
-    rsi8 = calculate_rsi(df['close'], 8).iloc[-1]
+    rsi5 = calculate_rsi(df['close'], 5).iloc[-1]
     rsi13 = calculate_rsi(df['close'], 13).iloc[-1]
     rsi21 = calculate_rsi(df['close'], 21).iloc[-1]
     kdj_k, kdj_d, kdj_j = calculate_kdj(df)
 
     stoch_trend = analyze_stoch_rsi_trend(k, d)
-    rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
+    rsi_trend = analyze_rsi_trend(rsi5, rsi13, rsi21)
     kdj_trend = analyze_kdj_trend(kdj_k, kdj_d, kdj_j)
 
     signals = [stoch_trend, wr_trend, rsi_trend, kdj_trend]
 
-    if all(signal == "up" for signal in signals):
+    up_signals = signals.count("up")
+    down_signals = signals.count("down")
+
+    if up_signals > down_signals:
         return "buy"
-    elif all(signal == "down" for signal in signals):
+    elif down_signals > up_signals:
         return "sell"
     else:
         return None
 
-# --- BACKTEST FUNCTION (45 MIN HOLD) ---
-
-def backtest(symbol='EUR/USD', timeframe='15m', days=2, hold_period=3):
-    exchange = ccxt.kraken()
-    exchange.load_markets()
-    since = exchange.parse8601((datetime.utcnow() - timedelta(days=days)).strftime('%Y-%m-%dT%H:%M:%S'))
-    limit = int((days * 24 * 60) / 15) + 10  # number of 15m candles in days + buffer
-
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        df = df.astype(float)
-    except Exception as e:
-        print(f"Error fetching OHLCV data for backtest: {e}")
-        return 0
-
-    correct_signals = 0
-    total_signals = 0
-
-    start_idx = 233  # Ensure enough data for indicators
-
-    for i in range(start_idx, len(df) - hold_period):
-        df_slice = df.iloc[:i+1]
-        signal = check_signal(df_slice)
-        if signal is None:
-            continue
-
-        entry_price = df['close'].iloc[i]
-        exit_price = df['close'].iloc[i + hold_period]
-
-        total_signals += 1
-
-        if signal == "buy" and exit_price > entry_price:
-            correct_signals += 1
-        elif signal == "sell" and exit_price < entry_price:
-            correct_signals += 1
-
-    accuracy = (correct_signals / total_signals * 100) if total_signals > 0 else 0
-    print(f"Backtest completed for {symbol} over past {days} days with {hold_period*15} minutes hold time.")
-    print(f"Total signals: {total_signals}, Correct signals: {correct_signals}, Accuracy: {accuracy:.2f}%")
-    return accuracy
-
-# --- MAIN FUNCTION ---
+# --- MAIN FUNCTION (RUN ONCE) ---
 
 def main():
-    accuracy = backtest()
-    print(f"Backtest accuracy: {accuracy:.2f}%")
-    # Optionally send Telegram message with backtest result:
-    # message = f"📊 <b>Backtest Result</b>\nAccuracy: {accuracy:.2f}% over past 2 days with 45min hold."
-    # send_telegram_message(message)
+    print(f"Checking signals at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    df = fetch_latest_ohlcv()
+    if df is None or df.empty:
+        print("No data fetched, exiting.")
+        return
+
+    signal = check_signal(df)
+    if signal == "buy":
+        last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
+        message = f"🚀 <b>Buy Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n✅ Majority indicators aligned for buy."
+        send_telegram_message(message)
+    elif signal == "sell":
+        last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
+        message = f"🔥 <b>Sell Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n⚠️ Majority indicators aligned for sell."
+        send_telegram_message(message)
+    else:
+        print("No clear buy or sell signal detected.")
 
 if __name__ == "__main__":
     main()
