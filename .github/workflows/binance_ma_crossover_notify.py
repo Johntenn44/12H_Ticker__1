@@ -7,7 +7,6 @@ import time
 from datetime import datetime
 import traceback
 
-
 # --- TELEGRAM CONFIGURATION ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -130,7 +129,7 @@ def analyze_kdj_trend(k, d, j):
     else:
         return None
 
-# --- SIGNAL CHECK ---
+# --- SIGNAL CHECK (ALL INDICATORS MUST AGREE) ---
 
 def check_signal(df):
     k, d = calculate_stoch_rsi(df)
@@ -145,14 +144,12 @@ def check_signal(df):
     rsi_trend = analyze_rsi_trend(rsi8, rsi13, rsi21)
     kdj_trend = analyze_kdj_trend(kdj_k, kdj_d, kdj_j)
 
-    # Aggregate signals: buy if majority "up", sell if majority "down"
     signals = [stoch_trend, wr_trend, rsi_trend, kdj_trend]
-    up_signals = signals.count("up")
-    down_signals = signals.count("down")
 
-    if up_signals > down_signals:
+    # Signal only if all indicators agree
+    if all(signal == "up" for signal in signals):
         return "buy"
-    elif down_signals > up_signals:
+    elif all(signal == "down" for signal in signals):
         return "sell"
     else:
         return None
@@ -174,11 +171,11 @@ def main():
             message = f"<b>Buy Signal Prime Detected for EUR/USD</b>\nTime: {last_close_time}\nIndicators aligned for buy."
             send_telegram_message(message)
         elif signal == "sell":
-            last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')  # Fixed format here
+            last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
             message = f"<b>Sell Signal Prime Detected for EUR/USD</b>\nTime: {last_close_time}\nIndicators aligned for sell."
             send_telegram_message(message)
         else:
-            print("No clear buy or sell signal detected.")
+            print("Prime No clear buy or sell signal detected.")
 
         time.sleep(300)  # wait 5 minutes before next check
 
