@@ -155,7 +155,7 @@ def check_signal(df):
     else:
         return None
 
-def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=150):
+def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=350):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
@@ -170,7 +170,7 @@ def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=150):
         traceback.print_exc()
         return None
 
-def fetch_higher_ohlcv(symbol='EUR/USD', timeframe='1h', since=None, limit=30):
+def fetch_higher_ohlcv(symbol='EUR/USD', timeframe='1h', since=None, limit=100):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
@@ -185,7 +185,7 @@ def fetch_higher_ohlcv(symbol='EUR/USD', timeframe='1h', since=None, limit=30):
         traceback.print_exc()
         return None
 
-def fetch_higher_ohlcv_4h(symbol='EUR/USD', timeframe='4h', since=None, limit=10):
+def fetch_higher_ohlcv_4h(symbol='EUR/USD', timeframe='4h', since=None, limit=30):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
@@ -266,22 +266,22 @@ def backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h, persistence
 
 def main():
     end_time = datetime.utcnow()
-    start_time = end_time - timedelta(hours=24)  # Backtest past 24 hours
+    start_time = end_time - timedelta(days=3)  # Backtest past 3 days
 
     print(f"Fetching 15m data from {start_time} to {end_time} ...")
-    df_15m = fetch_ohlcv('EUR/USD', '15m', since=start_time, limit=150)
+    df_15m = fetch_ohlcv('EUR/USD', '15m', since=start_time, limit=350)
 
     print(f"Fetching 1h data from {start_time} to {end_time} ...")
-    df_1h = fetch_higher_ohlcv('EUR/USD', '1h', since=start_time, limit=30)
+    df_1h = fetch_higher_ohlcv('EUR/USD', '1h', since=start_time, limit=100)
 
     print(f"Fetching 4h data from {start_time} to {end_time} ...")
-    df_4h = fetch_higher_ohlcv_4h('EUR/USD', '4h', since=start_time, limit=10)
+    df_4h = fetch_higher_ohlcv_4h('EUR/USD', '4h', since=start_time, limit=30)
 
     if df_15m is None or df_15m.empty or df_1h is None or df_1h.empty or df_4h is None or df_4h.empty:
-        print("Failed to fetch required data for 24h backtest.")
+        print("Failed to fetch required data for 3-day backtest.")
         return
 
-    print(f"Running backtest for last 24 hours with multi-indicator, multi-timeframe confirmation, and time filter...")
+    print(f"Running backtest for last 3 days with multi-indicator, multi-timeframe confirmation, and time filter...")
     backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h)
 
 if __name__ == "__main__":
