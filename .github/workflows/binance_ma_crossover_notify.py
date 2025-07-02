@@ -155,7 +155,7 @@ def check_signal(df):
     else:
         return None
 
-def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=4000):
+def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=150):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
@@ -170,7 +170,7 @@ def fetch_ohlcv(symbol='EUR/USD', timeframe='15m', since=None, limit=4000):
         traceback.print_exc()
         return None
 
-def fetch_higher_ohlcv(symbol='EUR/USD', timeframe='1h', since=None, limit=1400):
+def fetch_higher_ohlcv(symbol='EUR/USD', timeframe='1h', since=None, limit=30):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
@@ -185,7 +185,7 @@ def fetch_higher_ohlcv(symbol='EUR/USD', timeframe='1h', since=None, limit=1400)
         traceback.print_exc()
         return None
 
-def fetch_higher_ohlcv_4h(symbol='EUR/USD', timeframe='4h', since=None, limit=600):
+def fetch_higher_ohlcv_4h(symbol='EUR/USD', timeframe='4h', since=None, limit=10):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
@@ -238,6 +238,7 @@ def backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h, persistence
         signal = check_signal_with_multi_htf(window_df, trend_1h, trend_4h)
         if signal in ['buy', 'sell']:
             signal_close = df_15m['close'].iloc[i]
+            print(f"Signal: {signal.upper()} at {timestamp} (Price: {signal_close})")  # Print time of entry
             for p in persistence_lengths:
                 future_closes = df_15m['close'].iloc[i + 1:i + 1 + p]
                 if len(future_closes) < p:
@@ -265,22 +266,22 @@ def backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h, persistence
 
 def main():
     end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=10)  # 10-day backtest period
+    start_time = end_time - timedelta(hours=24)  # Backtest past 24 hours
 
     print(f"Fetching 15m data from {start_time} to {end_time} ...")
-    df_15m = fetch_ohlcv('EUR/USD', '15m', since=start_time, limit=4000)
+    df_15m = fetch_ohlcv('EUR/USD', '15m', since=start_time, limit=150)
 
     print(f"Fetching 1h data from {start_time} to {end_time} ...")
-    df_1h = fetch_higher_ohlcv('EUR/USD', '1h', since=start_time, limit=1400)
+    df_1h = fetch_higher_ohlcv('EUR/USD', '1h', since=start_time, limit=30)
 
     print(f"Fetching 4h data from {start_time} to {end_time} ...")
-    df_4h = fetch_higher_ohlcv_4h('EUR/USD', '4h', since=start_time, limit=600)
+    df_4h = fetch_higher_ohlcv_4h('EUR/USD', '4h', since=start_time, limit=10)
 
     if df_15m is None or df_15m.empty or df_1h is None or df_1h.empty or df_4h is None or df_4h.empty:
-        print("Failed to fetch required data.")
+        print("Failed to fetch required data for 24h backtest.")
         return
 
-    print(f"Running backtest for last 10 days with multi-indicator, multi-timeframe confirmation, and time filter...")
+    print(f"Running backtest for last 24 hours with multi-indicator, multi-timeframe confirmation, and time filter...")
     backtest_signal_persistence_with_multi_htf(df_15m, df_1h, df_4h)
 
 if __name__ == "__main__":
