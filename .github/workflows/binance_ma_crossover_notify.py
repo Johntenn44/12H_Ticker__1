@@ -171,11 +171,11 @@ def main():
         signal = check_signal(df)
         if signal == "buy":
             last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-            message = f"<b>Buy Signal Detected for EUR/USD</b>\nTime: {last_close_time}\nIndicators aligned for buy."
+            message = f"<b>Buy Signal Prime Detected for EUR/USD</b>\nTime: {last_close_time}\nIndicators aligned for buy."
             send_telegram_message(message)
         elif signal == "sell":
             last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')  # Fixed format here
-            message = f"<b>Sell Signal Detected for EUR/USD</b>\nTime: {last_close_time}\nIndicators aligned for sell."
+            message = f"<b>Sell Signal Prime Detected for EUR/USD</b>\nTime: {last_close_time}\nIndicators aligned for sell."
             send_telegram_message(message)
         else:
             print("No clear buy or sell signal detected.")
