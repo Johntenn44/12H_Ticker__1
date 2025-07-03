@@ -1,29 +1,23 @@
+import subprocess
+import sys
+import os
+import atexit
+import time
+import requests
 import ccxt
 import pandas as pd
 import numpy as np
-import os
-import time
-import requests
 from datetime import datetime
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# --- Minimal HTTP server to bind port and keep Render happy ---
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running")
+# Start the webserver.py subprocess to bind the port
+webserver_path = os.path.join(os.path.dirname(__file__), 'webserver.py')
+webserver_process = subprocess.Popen([sys.executable, webserver_path])
 
-def run_http_server():
-    port = int(os.environ.get("PORT", 8000))
-    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
-    print(f"HTTP server running on port {port}")
-    server.serve_forever()
-
-# Start HTTP server in a daemon thread
-http_thread = threading.Thread(target=run_http_server, daemon=True)
-http_thread.start()
+# Ensure webserver subprocess is terminated on exit
+def cleanup():
+    print("Terminating webserver subprocess...")
+    webserver_process.terminate()
+atexit.register(cleanup)
 
 # --- Telegram notification ---
 def send_telegram_message(message):
@@ -227,12 +221,12 @@ def main():
             signal = check_signal(df)
             if signal == "buy":
                 last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-                message = f"🚀 <b>Buy (V) Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n✅ Majority indicators aligned for buy."
+                message = f"🚀 <b>Buy Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n✅ Majority indicators aligned for buy."
                 send_telegram_message(message)
                 print(message)
             elif signal == "sell":
                 last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-                message = f"🔥 <b>Sell (V) Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n⚠️ Majority indicators aligned for sell."
+                message = f"🔥 <b>Sell Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n⚠️ Majority indicators aligned for sell."
                 send_telegram_message(message)
                 print(message)
             else:
