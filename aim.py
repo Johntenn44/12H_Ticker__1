@@ -5,6 +5,25 @@ import os
 import time
 import requests
 from datetime import datetime
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# --- Minimal HTTP server to bind port and keep Render happy ---
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 8000))
+    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
+    print(f"HTTP server running on port {port}")
+    server.serve_forever()
+
+# Start HTTP server in a daemon thread
+http_thread = threading.Thread(target=run_http_server, daemon=True)
+http_thread.start()
 
 # --- Telegram notification ---
 def send_telegram_message(message):
@@ -27,7 +46,6 @@ def send_telegram_message(message):
         print(f"Error sending Telegram message: {e}")
 
 # --- Indicator functions ---
-
 def calculate_rsi(series, period=13):
     delta = series.diff()
     gain = delta.clip(lower=0)
@@ -70,7 +88,6 @@ def analyze_wr_relative_positions(wr_dict):
         wr_55 = wr_dict[55].iloc[-1]
     except (KeyError, IndexError):
         return None
-
     if wr_8 > wr_233 and wr_3 > wr_233 and wr_8 > wr_144 and wr_3 > wr_144:
         return "up"
     elif wr_8 < wr_55 and wr_3 < wr_55:
@@ -201,7 +218,6 @@ def main():
                 time.sleep(300)
                 continue
 
-            # Skip signals outside 6:00 - 22:59 UTC
             last_time = df.index[-1]
             if last_time.hour >= 23 or last_time.hour < 6:
                 print("Signal detected outside trading hours (11 PM - 6 AM). Skipping.")
@@ -222,10 +238,8 @@ def main():
             else:
                 print("No clear buy or sell signal detected.")
 
-            # Sleep 60 seconds to avoid multiple checks in the same minute
             time.sleep(180)
         else:
-            # Sleep 10 seconds and check again
             time.sleep(10)
 
 if __name__ == "__main__":
