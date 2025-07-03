@@ -223,7 +223,7 @@ def main():
                 print("No clear buy or sell signal detected.")
 
             # Sleep 60 seconds to avoid multiple checks in the same minute
-            time.sleep(60)
+            time.sleep(180)
         else:
             # Sleep 10 seconds and check again
             time.sleep(10)
