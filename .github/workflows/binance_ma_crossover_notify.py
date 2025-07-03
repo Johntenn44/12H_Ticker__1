@@ -1,31 +1,9 @@
 import ccxt
 import pandas as pd
 import numpy as np
-import os
-import time
-import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# --- Telegram notification ---
-def send_telegram_message(message):
-    TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-    TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram credentials are missing!")
-        return
-    url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
-    payload = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'text': message,
-        'parse_mode': 'HTML'
-    }
-    try:
-        requests.post(url, data=payload, timeout=10)
-    except Exception as e:
-        print(f"Failed to send Telegram message: {e}")
-
-# --- Indicator functions (same as before) ---
-
+# --- Indicator functions ---
 def calculate_rsi(series, period=13):
     delta = series.diff()
     gain = delta.clip(lower=0)
@@ -59,16 +37,15 @@ def calculate_multi_wr(df, lengths=[3, 13, 144, 8, 233, 55]):
         wr_dict[length] = wr.fillna(method='ffill')
     return wr_dict
 
-def analyze_wr_relative_positions(wr_dict):
+def analyze_wr_relative_positions(wr_dict, idx):
     try:
-        wr_8 = wr_dict[8].iloc[-1]
-        wr_3 = wr_dict[3].iloc[-1]
-        wr_144 = wr_dict[144].iloc[-1]
-        wr_233 = wr_dict[233].iloc[-1]
-        wr_55 = wr_dict[55].iloc[-1]
+        wr_8 = wr_dict[8].iloc[idx]
+        wr_3 = wr_dict[3].iloc[idx]
+        wr_144 = wr_dict[144].iloc[idx]
+        wr_233 = wr_dict[233].iloc[idx]
+        wr_55 = wr_dict[55].iloc[idx]
     except (KeyError, IndexError):
         return None
-
     if wr_8 > wr_233 and wr_3 > wr_233 and wr_8 > wr_144 and wr_3 > wr_144:
         return "up"
     elif wr_8 < wr_55 and wr_3 < wr_55:
@@ -85,30 +62,30 @@ def calculate_kdj(df, length=5, ma1=8, ma2=8):
     j = 3 * k - 2 * d
     return k, d, j
 
-def analyze_stoch_rsi_trend(k, d):
-    if len(k) < 2 or pd.isna(k.iloc[-2]) or pd.isna(d.iloc[-2]) or pd.isna(k.iloc[-1]) or pd.isna(d.iloc[-1]):
+def analyze_stoch_rsi_trend(k, d, idx):
+    if idx < 1 or pd.isna(k.iloc[idx-1]) or pd.isna(d.iloc[idx-1]) or pd.isna(k.iloc[idx]) or pd.isna(d.iloc[idx]):
         return None
-    if k.iloc[-2] < d.iloc[-2] and k.iloc[-1] > d.iloc[-1] and k.iloc[-1] < 80:
+    if k.iloc[idx-1] < d.iloc[idx-1] and k.iloc[idx] > d.iloc[idx] and k.iloc[idx] < 80:
         return "up"
-    elif k.iloc[-2] > d.iloc[-2] and k.iloc[-1] < d.iloc[-1] and k.iloc[-1] > 20:
+    elif k.iloc[idx-1] > d.iloc[idx-1] and k.iloc[idx] < d.iloc[idx] and k.iloc[idx] > 20:
         return "down"
     else:
         return None
 
-def analyze_rsi_trend(rsi5, rsi13, rsi21):
-    if rsi5 > rsi13 > rsi21:
+def analyze_rsi_trend(rsi5, rsi13, rsi21, idx):
+    if rsi5.iloc[idx] > rsi13.iloc[idx] > rsi21.iloc[idx]:
         return "up"
-    elif rsi5 < rsi13 < rsi21:
+    elif rsi5.iloc[idx] < rsi13.iloc[idx] < rsi21.iloc[idx]:
         return "down"
     else:
         return None
 
-def analyze_kdj_trend(k, d, j):
-    if len(k) < 2 or len(d) < 2 or len(j) < 2:
+def analyze_kdj_trend(k, d, j, idx):
+    if idx < 1:
         return None
-    k_prev, k_curr = k.iloc[-2], k.iloc[-1]
-    d_prev, d_curr = d.iloc[-2], d.iloc[-1]
-    j_prev, j_curr = j.iloc[-2], j.iloc[-1]
+    k_prev, k_curr = k.iloc[idx-1], k.iloc[idx]
+    d_prev, d_curr = d.iloc[idx-1], d.iloc[idx]
+    j_prev, j_curr = j.iloc[idx-1], j.iloc[idx]
     if k_prev < d_prev and k_curr > d_curr and j_curr > k_curr and j_curr > d_curr:
         return "up"
     elif k_prev > d_prev and k_curr < d_curr and j_curr < k_curr and j_curr < d_curr:
@@ -130,37 +107,38 @@ def calculate_bollinger_bands(close, window=20, num_std=2):
     lower_band = sma - (std * num_std)
     return upper_band, lower_band
 
-def check_signal(df):
+def check_signal(df, idx):
     k, d = calculate_stoch_rsi(df)
     wr_dict = calculate_multi_wr(df)
-    wr_trend = analyze_wr_relative_positions(wr_dict)
+    wr_trend = analyze_wr_relative_positions(wr_dict, idx)
 
-    rsi5 = calculate_rsi(df['close'], 5).iloc[-1]
-    rsi13 = calculate_rsi(df['close'], 13).iloc[-1]
-    rsi21 = calculate_rsi(df['close'], 21).iloc[-1]
+    rsi5 = calculate_rsi(df['close'], 5)
+    rsi13 = calculate_rsi(df['close'], 13)
+    rsi21 = calculate_rsi(df['close'], 21)
     kdj_k, kdj_d, kdj_j = calculate_kdj(df)
 
-    stoch_trend = analyze_stoch_rsi_trend(k, d)
-    rsi_trend = analyze_rsi_trend(rsi5, rsi13, rsi21)
-    kdj_trend = analyze_kdj_trend(kdj_k, kdj_d, kdj_j)
+    stoch_trend = analyze_stoch_rsi_trend(k, d, idx)
+    rsi_trend = analyze_rsi_trend(rsi5, rsi13, rsi21, idx)
+    kdj_trend = analyze_kdj_trend(kdj_k, kdj_d, kdj_j, idx)
 
     signals = [stoch_trend, wr_trend, rsi_trend, kdj_trend]
 
     macd_line, macd_signal = calculate_macd(df['close'])
     macd_trend = None
-    if len(macd_line) > 1 and macd_line.iloc[-2] < macd_signal.iloc[-2] and macd_line.iloc[-1] > macd_signal.iloc[-1]:
-        macd_trend = "up"
-    elif len(macd_line) > 1 and macd_line.iloc[-2] > macd_signal.iloc[-2] and macd_line.iloc[-1] < macd_signal.iloc[-1]:
-        macd_trend = "down"
+    if idx > 0:
+        if macd_line.iloc[idx-1] < macd_signal.iloc[idx-1] and macd_line.iloc[idx] > macd_signal.iloc[idx]:
+            macd_trend = "up"
+        elif macd_line.iloc[idx-1] > macd_signal.iloc[idx-1] and macd_line.iloc[idx] < macd_signal.iloc[idx]:
+            macd_trend = "down"
     if macd_trend:
         signals.append(macd_trend)
 
     upper_band, lower_band = calculate_bollinger_bands(df['close'])
-    price = df['close'].iloc[-1]
+    price = df['close'].iloc[idx]
     bb_trend = None
-    if price < lower_band.iloc[-1]:
+    if not np.isnan(lower_band.iloc[idx]) and price < lower_band.iloc[idx]:
         bb_trend = "up"
-    elif price > upper_band.iloc[-1]:
+    elif not np.isnan(upper_band.iloc[idx]) and price > upper_band.iloc[idx]:
         bb_trend = "down"
     if bb_trend:
         signals.append(bb_trend)
@@ -175,50 +153,51 @@ def check_signal(df):
     else:
         return None
 
-def fetch_latest_ohlcv(symbol='EUR/USD', timeframe='15m', limit=100):
+# --- Crypto pairs ---
+CRYPTO_SYMBOLS = [
+    "XRP/USDT", "XMR/USDT", "GMX/USDT", "LUNA/USDT", "TRX/USDT", "EIGEN/USDT",
+    "APE/USDT", "WAVES/USDT", "PLUME/USDT", "SUSHI/USDT", "DOGE/USDT", "VIRTUAL/USDT",
+    "CAKE/USDT", "GRASS/USDT", "AAVE/USDT", "SUI/USDT", "ARB/USDT", "XLM/USDT",
+    "MNT/USDT", "LTC/USDT", "NEAR/USDT"
+]
+
+def fetch_latest_ohlcv(symbol, timeframe='4h', limit=40):
     try:
-        exchange = ccxt.kraken()
+        exchange = ccxt.binance()
         exchange.load_markets()
+        if symbol not in exchange.symbols:
+            print(f"Symbol {symbol} not available on this exchange.")
+            return None
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         return df.astype(float)
     except Exception as e:
-        print(f"Error fetching OHLCV data: {e}")
+        print(f"Error fetching OHLCV data for {symbol}: {e}")
         return None
 
-def main():
-    while True:
-        print(f"Checking signals at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        df = fetch_latest_ohlcv()
+def backtest():
+    print(f"Backtesting for the last 4 days on 4h candles ({6 candles per day}, 24 candles)...\n")
+    for symbol in CRYPTO_SYMBOLS:
+        print(f"\n=== {symbol} ===")
+        df = fetch_latest_ohlcv(symbol, timeframe='4h', limit=40)
         if df is None or df.empty:
-            print("No data fetched, retrying in 5 minutes...")
-            time.sleep(300)
+            print("No data, skipping.")
             continue
 
-        # Filter out signals between 11 PM and 6 AM
-        last_time = df.index[-1]
-        if last_time.hour >= 23 or last_time.hour < 6:
-            print("Signal detected outside trading hours (11 PM - 6 AM). Skipping.")
-            time.sleep(300)
-            continue
-
-        signal = check_signal(df)
-        if signal == "buy":
-            last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-            message = f"🚀 <b>Buy Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n✅ Majority indicators aligned for buy."
-            send_telegram_message(message)
-            print(message)
-        elif signal == "sell":
-            last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-            message = f"🔥 <b>Sell Signal Detected for EUR/USD</b>\n🕒 Time: {last_close_time}\n⚠️ Majority indicators aligned for sell."
-            send_telegram_message(message)
-            print(message)
+        # Only last 24 candles (4 days)
+        df = df.iloc[-24:]
+        signals = []
+        for idx in range(len(df)):
+            signal = check_signal(df, idx)
+            if signal in ["buy", "sell"]:
+                signals.append((df.index[idx], signal, df['close'].iloc[idx]))
+        if signals:
+            for ts, sig, price in signals:
+                print(f"{ts.strftime('%Y-%m-%d %H:%M')} | {sig.upper()} at price {price}")
         else:
-            print("No clear buy or sell signal detected.")
-
-        time.sleep(300)  # wait 5 minutes before next check
+            print("No signals in last 4 days.")
 
 if __name__ == "__main__":
-    main()
+    backtest()
