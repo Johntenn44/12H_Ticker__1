@@ -204,7 +204,7 @@ def fetch_latest_ohlcv(symbol='EUR/USD', timeframe='4h', limit=100):
 def main():
     while True:
         now = datetime.utcnow()
-        if now.minute % 30 == 0:
+        if now.minute % 3 == 0:
             print(f"Checking signals at {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
             df = fetch_latest_ohlcv()
             if df is None or df.empty:
