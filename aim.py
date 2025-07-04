@@ -34,7 +34,8 @@ def send_telegram_message(message):
             payload = {
                 'chat_id': chat_id,
                 'text': message,
-                'parse_mode': 'HTML'
+                'parse_mode': 'HTML',
+                'disable_web_page_preview': True
             }
             try:
                 response = requests.post(url, data=payload, timeout=10)
@@ -194,15 +195,15 @@ def indicator_signal_bollinger(df, idx):
         return None
 
 INDICATOR_FUNCTIONS = {
-    'stoch_rsi': indicator_signal_stoch_rsi,
-    'wr': indicator_signal_wr,
-    'rsi': indicator_signal_rsi,
-    'kdj': indicator_signal_kdj,
-    'macd': indicator_signal_macd,
-    'bollinger': indicator_signal_bollinger,
+    'Stoch RSI': indicator_signal_stoch_rsi,
+    'Williams %R': indicator_signal_wr,
+    'RSI': indicator_signal_rsi,
+    'KDJ': indicator_signal_kdj,
+    'MACD': indicator_signal_macd,
+    'Bollinger': indicator_signal_bollinger,
 }
 
-def indicator_accuracy(df, indicator_func):
+def indicator_stats(df, indicator_func):
     correct = 0
     total = 0
     for idx in range(1, len(df)-1):  # avoid first and last candle
@@ -216,29 +217,26 @@ def indicator_accuracy(df, indicator_func):
         elif signal == "down" and price_next < price_now:
             correct += 1
         total += 1
-    return (correct / total) if total > 0 else 0.5  # default 0.5 if no signals
+    accuracy = (correct / total) if total > 0 else 0.5
+    return accuracy, total, correct
 
-def get_indicator_accuracies(df):
-    accuracies = {}
+def get_indicator_stats(df):
+    stats = {}
     for name, func in INDICATOR_FUNCTIONS.items():
-        accuracies[name] = indicator_accuracy(df, func)
-    return accuracies
+        acc, total, correct = indicator_stats(df, func)
+        stats[name] = {'accuracy': acc, 'total': total, 'correct': correct}
+    return stats
 
-def check_signal_with_confidence(df, accuracies):
-    # Get current signals
+def check_signal_with_confidence(df, stats):
     signals = {}
-    signals['stoch_rsi'] = indicator_signal_stoch_rsi(df, -1)
-    signals['wr'] = indicator_signal_wr(df, -1)
-    signals['rsi'] = indicator_signal_rsi(df, -1)
-    signals['kdj'] = indicator_signal_kdj(df, -1)
-    signals['macd'] = indicator_signal_macd(df, -1)
-    signals['bollinger'] = indicator_signal_bollinger(df, -1)
+    for name, func in INDICATOR_FUNCTIONS.items():
+        signals[name] = func(df, -1)
 
     up_weight = 0.0
     down_weight = 0.0
     total_weight = 0.0
     for name, signal in signals.items():
-        acc = accuracies.get(name, 0.5)
+        acc = stats.get(name, {}).get('accuracy', 0.5)
         if signal == "up":
             up_weight += acc
             total_weight += acc
@@ -280,11 +278,46 @@ def fetch_latest_ohlcv(symbol, timeframe='6h', limit=130):
         print("Error fetching OHLCV data for {}: {}".format(symbol, e))
         return None
 
+def format_signal_message(symbol, signal, confidence, indicator_states, time_str, stats):
+    if signal == "buy":
+        sig_emoji = "🚀"
+        sig_word = "<b>BUY</b>"
+        sig_line = "✅ <b>Majority indicators aligned for:</b> <b>BUY</b>"
+    else:
+        sig_emoji = "🔥"
+        sig_word = "<b>SELL</b>"
+        sig_line = "⚠️ <b>Majority indicators aligned for:</b> <b>SELL</b>"
+
+    indicator_rows = []
+    for name in INDICATOR_FUNCTIONS.keys():
+        val = indicator_states.get(name)
+        if val == "up":
+            val_disp = "🟢 up"
+        elif val == "down":
+            val_disp = "🔴 down"
+        else:
+            val_disp = "—"
+        s = stats.get(name, {})
+        hits = f"{s.get('correct',0)}/{s.get('total',0)}"
+        indicator_rows.append("{:<13} {:<8} ({})".format(name + ":", val_disp, hits))
+    indicator_table = "\n".join(indicator_rows)
+
+    message = (
+        f"{sig_emoji} <b>{sig_word} Signal Detected</b>\n"
+        f"<b>Pair:</b> <code>{symbol}</code>\n"
+        f"<b>Time:</b> <code>{time_str}</code>\n\n"
+        f"{sig_line}\n"
+        f"<b>Confidence:</b> <code>{confidence:.1f}%</code>\n\n"
+        f"📊 <b>Indicator Breakdown</b>\n"
+        f"<pre>{indicator_table}</pre>"
+        f"\n<i>Hits = correct predictions / total entries (past month)</i>"
+    )
+    return message
+
 def main():
     last_checked_hour = None
     while True:
         now = datetime.utcnow()
-        # Check at the start of each 6-hour candle (UTC hours 0, 6, 12, 18)
         if now.hour % 6 == 0 and (last_checked_hour != now.hour or last_checked_hour is None):
             last_checked_hour = now.hour
             print("\nChecking signals for all symbols at {}".format(now.strftime('%Y-%m-%d %H:%M:%S UTC')))
@@ -295,36 +328,17 @@ def main():
                     print("No data for {}, skipping.".format(symbol))
                     continue
 
-                # Use last 120 candles for accuracy (1 month), last for live signal
                 backtest_df = df.iloc[-121:-1]  # last 120 before current
-                accuracies = get_indicator_accuracies(backtest_df)
-                signal, confidence, indicator_states = check_signal_with_confidence(df, accuracies)
-                if signal == "buy":
+                stats = get_indicator_stats(backtest_df)
+                signal, confidence, indicator_states = check_signal_with_confidence(df, stats)
+                if signal in ("buy", "sell"):
                     last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-                    message = (
-                        "🚀 <b>Buy Signal Detected for {}</b>\n"
-                        "🕒 Time: {}\n"
-                        "✅ Majority indicators aligned for buy.\n"
-                        "📊 Confidence: {:.1f}%\n"
-                        "🔎 Indicators: {}\n"
-                    ).format(symbol, last_close_time, confidence, indicator_states)
-                    send_telegram_message(message)
-                    print(message)
-                elif signal == "sell":
-                    last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-                    message = (
-                        "🔥 <b>Sell Signal Detected for {}</b>\n"
-                        "🕒 Time: {}\n"
-                        "⚠️ Majority indicators aligned for sell.\n"
-                        "📊 Confidence: {:.1f}%\n"
-                        "🔎 Indicators: {}\n"
-                    ).format(symbol, last_close_time, confidence, indicator_states)
+                    message = format_signal_message(symbol, signal, confidence, indicator_states, last_close_time, stats)
                     send_telegram_message(message)
                     print(message)
                 else:
                     print("No clear buy or sell signal detected for {}.".format(symbol))
 
-            # Sleep until next 6-hour candle
             now = datetime.utcnow()
             minutes_until_next_6h = ((6 - (now.hour % 6)) % 6) * 60 + (60 - now.minute)
             sleep_seconds = minutes_until_next_6h * 60
