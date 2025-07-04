@@ -188,7 +188,7 @@ def check_signal(df):
     else:
         return None
 
-def fetch_latest_ohlcv(symbol='EUR/USD', timeframe='15m', limit=100):
+def fetch_latest_ohlcv(symbol='EUR/USD', timeframe='4h', limit=100):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
