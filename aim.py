@@ -17,7 +17,6 @@ def cleanup():
     webserver_process.terminate()
 atexit.register(cleanup)
 
-# Telegram config from environment variables
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
@@ -47,7 +46,6 @@ def send_telegram_message(message):
     if not sent:
         print("No TELEGRAM_CHAT_ID or TELEGRAM_CHANNEL_ID set, message not sent!")
 
-# Indicator calculations
 def calculate_rsi(series, period=13):
     delta = series.diff()
     gain = delta.clip(lower=0)
@@ -107,11 +105,11 @@ def calculate_kdj(df, length=5, ma1=8, ma2=8):
     return k, d, j
 
 def analyze_stoch_rsi_trend(k, d, idx=-1):
-    if idx < 1 or pd.isna(k.iloc[idx-1]) or pd.isna(d.iloc[idx-1]) or pd.isna(k.iloc[idx]) or pd.isna(d.iloc[idx]):
+    if pd.isna(k.iloc[idx]) or pd.isna(d.iloc[idx]):
         return None
-    if k.iloc[idx-1] < d.iloc[idx-1] and k.iloc[idx] > d.iloc[idx] and k.iloc[idx] < 80:
+    if k.iloc[idx] > d.iloc[idx]:
         return "up"
-    elif k.iloc[idx-1] > d.iloc[idx-1] and k.iloc[idx] < d.iloc[idx] and k.iloc[idx] > 20:
+    elif k.iloc[idx] < d.iloc[idx]:
         return "down"
     else:
         return None
@@ -125,14 +123,11 @@ def analyze_rsi_trend(rsi5, rsi13, rsi21, idx=-1):
         return None
 
 def analyze_kdj_trend(k, d, j, idx=-1):
-    if idx < 1:
+    if pd.isna(k.iloc[idx]) or pd.isna(d.iloc[idx]) or pd.isna(j.iloc[idx]):
         return None
-    k_prev, k_curr = k.iloc[idx-1], k.iloc[idx]
-    d_prev, d_curr = d.iloc[idx-1], d.iloc[idx]
-    j_prev, j_curr = j.iloc[idx-1], j.iloc[idx]
-    if k_prev < d_prev and k_curr > d_curr and j_curr > k_curr and j_curr > d_curr:
+    if j.iloc[idx] > k.iloc[idx] and j.iloc[idx] > d.iloc[idx]:
         return "up"
-    elif k_prev > d_prev and k_curr < d_curr and j_curr < k_curr and j_curr < d_curr:
+    elif j.iloc[idx] < k.iloc[idx] and j.iloc[idx] < d.iloc[idx]:
         return "down"
     else:
         return None
@@ -151,27 +146,46 @@ def calculate_bollinger_bands(close, window=20, num_std=2):
     lower_band = sma - (std * num_std)
     return upper_band, lower_band
 
-# Indicator signal functions
+def calculate_indicators(df):
+    df['rsi5'] = calculate_rsi(df['close'], 5)
+    df['rsi13'] = calculate_rsi(df['close'], 13)
+    df['rsi21'] = calculate_rsi(df['close'], 21)
+    k, d = calculate_stoch_rsi(df, rsi_len=13, stoch_len=8, smooth_k=5, smooth_d=3)
+    df['stochrsi_k'] = k
+    df['stochrsi_d'] = d
+    wr_dict = calculate_multi_wr(df, lengths=[3, 13, 144, 8, 233, 55])
+    for length, series in wr_dict.items():
+        df[f'wr_{length}'] = series
+    kdj_k, kdj_d, kdj_j = calculate_kdj(df, length=5, ma1=8, ma2=8)
+    df['kdj_k'] = kdj_k
+    df['kdj_d'] = kdj_d
+    df['kdj_j'] = kdj_j
+    macd_line, macd_signal = calculate_macd(df['close'])
+    df['macd_line'] = macd_line
+    df['macd_signal'] = macd_signal
+    upper_band, lower_band = calculate_bollinger_bands(df['close'])
+    df['bb_upper'] = upper_band
+    df['bb_lower'] = lower_band
+    return df
+
 def indicator_signal_stoch_rsi(df, idx):
-    k, d = calculate_stoch_rsi(df)
+    k = df['stochrsi_k']
+    d = df['stochrsi_d']
     return analyze_stoch_rsi_trend(k, d, idx)
 
 def indicator_signal_wr(df, idx):
-    wr_dict = calculate_multi_wr(df)
+    wr_dict = {length: df[f'wr_{length}'] for length in [3, 13, 144, 8, 233, 55]}
     return analyze_wr_relative_positions(wr_dict, idx)
 
 def indicator_signal_rsi(df, idx):
-    rsi5 = calculate_rsi(df['close'], 5)
-    rsi13 = calculate_rsi(df['close'], 13)
-    rsi21 = calculate_rsi(df['close'], 21)
-    return analyze_rsi_trend(rsi5, rsi13, rsi21, idx)
+    return analyze_rsi_trend(df['rsi5'], df['rsi13'], df['rsi21'], idx)
 
 def indicator_signal_kdj(df, idx):
-    k, d, j = calculate_kdj(df)
-    return analyze_kdj_trend(k, d, j, idx)
+    return analyze_kdj_trend(df['kdj_k'], df['kdj_d'], df['kdj_j'], idx)
 
 def indicator_signal_macd(df, idx):
-    macd_line, macd_signal = calculate_macd(df['close'])
+    macd_line = df['macd_line']
+    macd_signal = df['macd_signal']
     if idx < 1 or len(macd_line) <= idx:
         return None
     if macd_line.iloc[idx-1] < macd_signal.iloc[idx-1] and macd_line.iloc[idx] > macd_signal.iloc[idx]:
@@ -182,8 +196,9 @@ def indicator_signal_macd(df, idx):
         return None
 
 def indicator_signal_bollinger(df, idx):
-    upper_band, lower_band = calculate_bollinger_bands(df['close'])
     price = df['close'].iloc[idx]
+    upper_band = df['bb_upper']
+    lower_band = df['bb_lower']
     if np.isnan(upper_band.iloc[idx]) or np.isnan(lower_band.iloc[idx]):
         return None
     if price < lower_band.iloc[idx]:
@@ -206,26 +221,20 @@ def calculate_hits(df, indicator_func):
     hits = 0
     total_entries = 0
     last_signal = None
-
-    for idx in range(1, len(df) - 2):  # leave space for 2 subsequent candles
+    for idx in range(1, len(df) - 2):
         signal = indicator_func(df, idx)
-
-        # Detect new entry signal (signal changes from None or opposite)
         if signal in ("up", "down") and signal != last_signal:
             total_entries += 1
             price_now = df['close'].iloc[idx]
             price_1 = df['close'].iloc[idx + 1]
             price_2 = df['close'].iloc[idx + 2]
-
             if signal == "up":
                 if price_1 > price_now and price_2 > price_1:
                     hits += 1
             elif signal == "down":
                 if price_1 < price_now and price_2 < price_1:
                     hits += 1
-
         last_signal = signal
-
     hit_rate = hits / total_entries if total_entries > 0 else 0
     return hits, total_entries, hit_rate
 
@@ -233,7 +242,6 @@ def indicator_accuracy_and_hits(df, indicator_func, indicator_name):
     correct = 0
     total = 0
     hits, total_entries, hit_rate = calculate_hits(df, indicator_func)
-
     for idx in range(1, len(df) - 1):
         signal = indicator_func(df, idx)
         if signal not in ("up", "down"):
@@ -245,9 +253,7 @@ def indicator_accuracy_and_hits(df, indicator_func, indicator_name):
         elif signal == "down" and price_next < price_now:
             correct += 1
         total += 1
-
     accuracy = (correct / total) if total > 0 else 0.5
-
     idx = len(df) - 3
     current_signal = indicator_func(df, idx)
     is_ongoing = False
@@ -257,7 +263,6 @@ def indicator_accuracy_and_hits(df, indicator_func, indicator_name):
     elif current_signal == "down":
         is_ongoing = (df['close'].iloc[idx + 1] < df['close'].iloc[idx] and
                       df['close'].iloc[idx + 2] < df['close'].iloc[idx + 1])
-
     return accuracy, hits, total_entries, is_ongoing
 
 def get_indicator_accuracies_and_hits(df):
@@ -277,7 +282,6 @@ def check_signal_with_confidence(df, accuracies, ongoing):
     signals = {}
     for name, func in INDICATOR_FUNCTIONS.items():
         signals[name] = func(df, -1)
-
     up_weight = 0.0
     down_weight = 0.0
     total_weight = 0.0
@@ -292,10 +296,8 @@ def check_signal_with_confidence(df, accuracies, ongoing):
         elif signal == "down":
             down_weight += weighted_acc
             total_weight += weighted_acc
-
     if total_weight == 0:
         return None, 0, signals
-
     if up_weight > down_weight:
         confidence = (up_weight / total_weight) * 100
         return "buy", confidence, signals
@@ -329,36 +331,41 @@ def fetch_latest_ohlcv(symbol, timeframe='6h', limit=750):
         return None
 
 def format_signal_message(symbol, signal, confidence, indicator_states, indicator_hits, indicator_totals, indicator_ongoing, time_str):
-    if signal == "buy":
-        sig_emoji = "🚀"
-        sig_word = "<b>BUY</b>"
-        sig_line = "✅ <b>Majority indicators aligned for:</b> <b>BUY</b>"
-    else:
-        sig_emoji = "🔥"
-        sig_word = "<b>SELL</b>"
-        sig_line = "⚠️ <b>Majority indicators aligned for:</b> <b>SELL</b>"
-
-    indicator_rows = []
+    indicator_stats = []
     for name in INDICATOR_FUNCTIONS.keys():
         val = indicator_states.get(name)
+        hit = indicator_hits.get(name, 0)
+        total = indicator_totals.get(name, 0)
+        hit_rate = (hit / total * 100) if total > 0 else 0.0
+        agrees = 1 if ((signal == "buy" and val == "up") or (signal == "sell" and val == "down")) else 0
+        ongoing = indicator_ongoing.get(name, False)
+        ongoing_mark = "✅" if ongoing else "❌"
         if val == "up":
             val_disp = "🟢 up"
         elif val == "down":
             val_disp = "🔴 down"
         else:
             val_disp = "—"
-        hit = indicator_hits.get(name, 0)
-        total = indicator_totals.get(name, 0)
-        acc_percent = (hit / total * 100) if total > 0 else 0.0
-        ongoing_mark = "✅" if indicator_ongoing.get(name, False) else "❌"
-        indicator_rows.append(f"{name + ':':<13} {val_disp:<10} ({hit}/{total})  {acc_percent:5.1f}%  {ongoing_mark}")
+        indicator_stats.append({
+            "name": name,
+            "val_disp": val_disp,
+            "hit": hit,
+            "total": total,
+            "hit_rate": hit_rate,
+            "agrees": agrees,
+            "ongoing_mark": ongoing_mark
+        })
+    indicator_stats.sort(key=lambda x: (x['agrees'], x['hit_rate'], x['hit']), reverse=True)
+    indicator_rows = [
+        f"{x['name'] + ':':<13} {x['val_disp']:<10} ({x['hit']}/{x['total']})  {x['hit_rate']:5.1f}%  {x['ongoing_mark']}"
+        for x in indicator_stats
+    ]
     indicator_table = "\n".join(indicator_rows)
-
     message = (
-        f"{sig_emoji} <b>{sig_word} Signal Detected</b>\n"
+        f"{'🚀' if signal == 'buy' else '🔥'} <b>{'BUY' if signal == 'buy' else 'SELL'} Signal Detected</b>\n"
         f"<b>Pair:</b> <code>{symbol}</code>\n"
         f"<b>Time:</b> <code>{time_str}</code>\n\n"
-        f"{sig_line}\n"
+        f"{'✅' if signal == 'buy' else '⚠️'} <b>Majority indicators aligned for:</b> <b>{'BUY' if signal == 'buy' else 'SELL'}</b>\n"
         f"<b>Confidence:</b> <code>{confidence:.1f}%</code>\n\n"
         f"📊 <b>Indicator Breakdown</b>\n"
         f"<pre>{indicator_table}</pre>\n"
@@ -380,8 +387,8 @@ def main():
                 if df is None or len(df) < 700:
                     print(f"Not enough data for {symbol}, skipping.")
                     continue
-
-                backtest_df = df.iloc[-751:-1]  # Last ~6 months (750 candles)
+                df = calculate_indicators(df)
+                backtest_df = df.iloc[-751:-1]
                 accuracies, hits, totals, ongoing = get_indicator_accuracies_and_hits(backtest_df)
                 signal, confidence, indicator_states = check_signal_with_confidence(df, accuracies, ongoing)
                 if signal in ("buy", "sell"):
@@ -391,7 +398,6 @@ def main():
                     print(message)
                 else:
                     print(f"No clear buy or sell signal detected for {symbol}.")
-
             now = datetime.utcnow()
             minutes_until_next_6h = ((6 - (now.hour % 6)) % 6) * 60 + (60 - now.minute)
             sleep_seconds = minutes_until_next_6h * 60
