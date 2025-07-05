@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-# --- Start webserver.py subprocess for Render port binding ---
+# Start webserver.py subprocess for Render port binding
 webserver_path = os.path.join(os.path.dirname(__file__), 'webserver.py')
 webserver_process = subprocess.Popen([sys.executable, webserver_path])
 def cleanup():
@@ -17,7 +17,7 @@ def cleanup():
     webserver_process.terminate()
 atexit.register(cleanup)
 
-# --- Telegram config from environment ---
+# Telegram config from environment variables
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
@@ -26,11 +26,10 @@ def send_telegram_message(message):
     if not TELEGRAM_BOT_TOKEN:
         print("TELEGRAM_BOT_TOKEN not set!")
         return
-
     sent = False
     for chat_id in [TELEGRAM_CHAT_ID, TELEGRAM_CHANNEL_ID]:
         if chat_id:
-            url = "https://api.telegram.org/bot{}/sendMessage".format(TELEGRAM_BOT_TOKEN)
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
                 'chat_id': chat_id,
                 'text': message,
@@ -40,15 +39,15 @@ def send_telegram_message(message):
             try:
                 response = requests.post(url, data=payload, timeout=10)
                 if not response.ok:
-                    print("Failed to send message to {}: {}".format(chat_id, response.text))
+                    print(f"Failed to send message to {chat_id}: {response.text}")
                 else:
                     sent = True
             except Exception as e:
-                print("Error sending Telegram message to {}: {}".format(chat_id, e))
+                print(f"Error sending Telegram message to {chat_id}: {e}")
     if not sent:
         print("No TELEGRAM_CHAT_ID or TELEGRAM_CHANNEL_ID set, message not sent!")
 
-# --- Indicator functions ---
+# Indicator calculations
 def calculate_rsi(series, period=13):
     delta = series.diff()
     gain = delta.clip(lower=0)
@@ -152,7 +151,7 @@ def calculate_bollinger_bands(close, window=20, num_std=2):
     lower_band = sma - (std * num_std)
     return upper_band, lower_band
 
-# --- Indicator backtest (accuracy) functions ---
+# Indicator signal functions
 def indicator_signal_stoch_rsi(df, idx):
     k, d = calculate_stoch_rsi(df)
     return analyze_stoch_rsi_trend(k, d, idx)
@@ -203,31 +202,78 @@ INDICATOR_FUNCTIONS = {
     'Bollinger': indicator_signal_bollinger,
 }
 
-def indicator_stats(df, indicator_func):
+def calculate_hits(df, indicator_func):
+    hits = 0
+    total_entries = 0
+    last_signal = None
+
+    for idx in range(1, len(df) - 2):  # leave space for 2 subsequent candles
+        signal = indicator_func(df, idx)
+
+        # Detect new entry signal (signal changes from None or opposite)
+        if signal in ("up", "down") and signal != last_signal:
+            total_entries += 1
+            price_now = df['close'].iloc[idx]
+            price_1 = df['close'].iloc[idx + 1]
+            price_2 = df['close'].iloc[idx + 2]
+
+            if signal == "up":
+                if price_1 > price_now and price_2 > price_1:
+                    hits += 1
+            elif signal == "down":
+                if price_1 < price_now and price_2 < price_1:
+                    hits += 1
+
+        last_signal = signal
+
+    hit_rate = hits / total_entries if total_entries > 0 else 0
+    return hits, total_entries, hit_rate
+
+def indicator_accuracy_and_hits(df, indicator_func, indicator_name):
     correct = 0
     total = 0
-    for idx in range(1, len(df)-1):  # avoid first and last candle
+    hits, total_entries, hit_rate = calculate_hits(df, indicator_func)
+
+    for idx in range(1, len(df) - 1):
         signal = indicator_func(df, idx)
         if signal not in ("up", "down"):
             continue
         price_now = df['close'].iloc[idx]
-        price_next = df['close'].iloc[idx+1]
+        price_next = df['close'].iloc[idx + 1]
         if signal == "up" and price_next > price_now:
             correct += 1
         elif signal == "down" and price_next < price_now:
             correct += 1
         total += 1
+
     accuracy = (correct / total) if total > 0 else 0.5
-    return accuracy, total, correct
 
-def get_indicator_stats(df):
-    stats = {}
+    idx = len(df) - 3
+    current_signal = indicator_func(df, idx)
+    is_ongoing = False
+    if current_signal == "up":
+        is_ongoing = (df['close'].iloc[idx + 1] > df['close'].iloc[idx] and
+                      df['close'].iloc[idx + 2] > df['close'].iloc[idx + 1])
+    elif current_signal == "down":
+        is_ongoing = (df['close'].iloc[idx + 1] < df['close'].iloc[idx] and
+                      df['close'].iloc[idx + 2] < df['close'].iloc[idx + 1])
+
+    return accuracy, hits, total_entries, is_ongoing
+
+def get_indicator_accuracies_and_hits(df):
+    accuracies = {}
+    hits = {}
+    totals = {}
+    ongoing = {}
     for name, func in INDICATOR_FUNCTIONS.items():
-        acc, total, correct = indicator_stats(df, func)
-        stats[name] = {'accuracy': acc, 'total': total, 'correct': correct}
-    return stats
+        acc, hit, total, is_ongoing = indicator_accuracy_and_hits(df, func, name)
+        accuracies[name] = acc
+        hits[name] = hit
+        totals[name] = total
+        ongoing[name] = is_ongoing
+    return accuracies, hits, totals, ongoing
 
-def check_signal_with_confidence(df, stats):
+def check_signal_with_confidence(df, accuracies, ongoing):
     signals = {}
     for name, func in INDICATOR_FUNCTIONS.items():
         signals[name] = func(df, -1)
@@ -236,13 +282,17 @@ def check_signal_with_confidence(df, stats):
     down_weight = 0.0
     total_weight = 0.0
     for name, signal in signals.items():
-        acc = stats.get(name, {}).get('accuracy', 0.5)
+        acc = accuracies.get(name, 0.5)
+        trend_continues = ongoing.get(name, False)
+        weight_factor = 1.0 if trend_continues else 0.5
+        weighted_acc = acc * weight_factor
         if signal == "up":
-            up_weight += acc
-            total_weight += acc
+            up_weight += weighted_acc
+            total_weight += weighted_acc
         elif signal == "down":
-            down_weight += acc
-            total_weight += acc
+            down_weight += weighted_acc
+            total_weight += weighted_acc
+
     if total_weight == 0:
         return None, 0, signals
 
@@ -262,12 +312,12 @@ CRYPTO_SYMBOLS = [
     "MNT/USDT", "LTC/USDT", "NEAR/USDT"
 ]
 
-def fetch_latest_ohlcv(symbol, timeframe='6h', limit=130):
+def fetch_latest_ohlcv(symbol, timeframe='6h', limit=750):
     try:
         exchange = ccxt.kucoin()
         exchange.load_markets()
         if symbol not in exchange.symbols:
-            print("Symbol {} not available on this exchange.".format(symbol))
+            print(f"Symbol {symbol} not available on this exchange.")
             return None
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -275,10 +325,10 @@ def fetch_latest_ohlcv(symbol, timeframe='6h', limit=130):
         df.set_index('timestamp', inplace=True)
         return df.astype(float)
     except Exception as e:
-        print("Error fetching OHLCV data for {}: {}".format(symbol, e))
+        print(f"Error fetching OHLCV data for {symbol}: {e}")
         return None
 
-def format_signal_message(symbol, signal, confidence, indicator_states, time_str, stats):
+def format_signal_message(symbol, signal, confidence, indicator_states, indicator_hits, indicator_totals, indicator_ongoing, time_str):
     if signal == "buy":
         sig_emoji = "🚀"
         sig_word = "<b>BUY</b>"
@@ -297,9 +347,11 @@ def format_signal_message(symbol, signal, confidence, indicator_states, time_str
             val_disp = "🔴 down"
         else:
             val_disp = "—"
-        s = stats.get(name, {})
-        hits = f"{s.get('correct',0)}/{s.get('total',0)}"
-        indicator_rows.append("{:<13} {:<8} ({})".format(name + ":", val_disp, hits))
+        hit = indicator_hits.get(name, 0)
+        total = indicator_totals.get(name, 0)
+        acc_percent = (hit / total * 100) if total > 0 else 0.0
+        ongoing_mark = "✅" if indicator_ongoing.get(name, False) else "❌"
+        indicator_rows.append(f"{name + ':':<13} {val_disp:<10} ({hit}/{total})  {acc_percent:5.1f}%  {ongoing_mark}")
     indicator_table = "\n".join(indicator_rows)
 
     message = (
@@ -309,8 +361,9 @@ def format_signal_message(symbol, signal, confidence, indicator_states, time_str
         f"{sig_line}\n"
         f"<b>Confidence:</b> <code>{confidence:.1f}%</code>\n\n"
         f"📊 <b>Indicator Breakdown</b>\n"
-        f"<pre>{indicator_table}</pre>"
-        f"\n<i>Hits = correct predictions / total entries (past month)</i>"
+        f"<pre>{indicator_table}</pre>\n"
+        f"<i>Hits = correct predictions / total entries (past 6 months)</i>\n"
+        f"<i>Ongoing trend: ✅ = yes, ❌ = no</i>"
     )
     return message
 
@@ -320,29 +373,29 @@ def main():
         now = datetime.utcnow()
         if now.hour % 6 == 0 and (last_checked_hour != now.hour or last_checked_hour is None):
             last_checked_hour = now.hour
-            print("\nChecking signals for all symbols at {}".format(now.strftime('%Y-%m-%d %H:%M:%S UTC')))
+            print(f"\nChecking signals for all symbols at {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
             for symbol in CRYPTO_SYMBOLS:
-                print("\n--- Checking {} ---".format(symbol))
-                df = fetch_latest_ohlcv(symbol, timeframe='6h', limit=130)
-                if df is None or len(df) < 50:
-                    print("No data for {}, skipping.".format(symbol))
+                print(f"\n--- Checking {symbol} ---")
+                df = fetch_latest_ohlcv(symbol, timeframe='6h', limit=750)
+                if df is None or len(df) < 700:
+                    print(f"Not enough data for {symbol}, skipping.")
                     continue
 
-                backtest_df = df.iloc[-121:-1]  # last 120 before current
-                stats = get_indicator_stats(backtest_df)
-                signal, confidence, indicator_states = check_signal_with_confidence(df, stats)
+                backtest_df = df.iloc[-751:-1]  # Last ~6 months (750 candles)
+                accuracies, hits, totals, ongoing = get_indicator_accuracies_and_hits(backtest_df)
+                signal, confidence, indicator_states = check_signal_with_confidence(df, accuracies, ongoing)
                 if signal in ("buy", "sell"):
                     last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-                    message = format_signal_message(symbol, signal, confidence, indicator_states, last_close_time, stats)
+                    message = format_signal_message(symbol, signal, confidence, indicator_states, hits, totals, ongoing, last_close_time)
                     send_telegram_message(message)
                     print(message)
                 else:
-                    print("No clear buy or sell signal detected for {}.".format(symbol))
+                    print(f"No clear buy or sell signal detected for {symbol}.")
 
             now = datetime.utcnow()
             minutes_until_next_6h = ((6 - (now.hour % 6)) % 6) * 60 + (60 - now.minute)
             sleep_seconds = minutes_until_next_6h * 60
-            print("\nSleeping for {} minutes until next 6-hour candle...".format(int(sleep_seconds // 60)))
+            print(f"\nSleeping for {int(sleep_seconds // 60)} minutes until next 6-hour candle...")
             time.sleep(sleep_seconds)
         else:
             time.sleep(60)
