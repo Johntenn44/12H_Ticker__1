@@ -8,7 +8,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 from datetime import datetime
-
+import flask
 # Start webserver.py subprocess for Render port binding
 webserver_path = os.path.join(os.path.dirname(__file__), 'webserver.py')
 webserver_process = subprocess.Popen([sys.executable, webserver_path])
