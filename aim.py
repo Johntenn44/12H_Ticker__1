@@ -2,6 +2,7 @@ import subprocess
 import sys
 import os
 import atexit
+import time
 import requests
 import ccxt
 import pandas as pd
@@ -44,8 +45,6 @@ def send_telegram_message(message):
                 print(f"Error sending Telegram message to {chat_id}: {e}")
     if not sent:
         print("No TELEGRAM_CHAT_ID or TELEGRAM_CHANNEL_ID set, message not sent!")
-
-# --- Indicator and analysis functions (same as before) ---
 
 def calculate_rsi(series, period=13):
     delta = series.diff()
@@ -370,22 +369,39 @@ def fetch_latest_ohlcv(symbol, timeframe='4h', limit=750):
 
 def main():
     symbol = "EUR/USD"
-    print(f"Checking signals for {symbol} at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    df = fetch_latest_ohlcv(symbol, timeframe='4h', limit=750)
-    if df is None or len(df) < 700:
-        print(f"Not enough data for {symbol}, exiting.")
-        return
-    df = calculate_indicators(df)
-    backtest_df = df.iloc[-751:-1]
-    accuracies, hits, totals, ongoing = get_indicator_accuracies_and_hits(backtest_df)
-    signal, confidence, indicator_states = check_signal_with_confidence(df, accuracies, ongoing)
-    if signal in ("buy", "sell"):
-        last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-        message = format_signal_message(symbol, signal, confidence, indicator_states, hits, totals, ongoing, last_close_time)
-        send_telegram_message(message)
-        print(message)
-    else:
-        print(f"No clear buy or sell signal detected for {symbol}.")
+    last_checked_hour = None
+    while True:
+        now = datetime.utcnow()
+        # Run every 4 hours on the hour (0,4,8,12,16,20)
+        if now.hour % 4 == 0 and (last_checked_hour != now.hour or last_checked_hour is None):
+            last_checked_hour = now.hour
+            print(f"\nChecking signals for {symbol} at {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            df = fetch_latest_ohlcv(symbol, timeframe='4h', limit=750)
+            if df is None or len(df) < 700:
+                print(f"Not enough data for {symbol}, skipping.")
+            else:
+                df = calculate_indicators(df)
+                backtest_df = df.iloc[-751:-1]
+                accuracies, hits, totals, ongoing = get_indicator_accuracies_and_hits(backtest_df)
+                signal, confidence, indicator_states = check_signal_with_confidence(df, accuracies, ongoing)
+                if signal in ("buy", "sell"):
+                    last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
+                    message = format_signal_message(symbol, signal, confidence, indicator_states, hits, totals, ongoing, last_close_time)
+                    send_telegram_message(message)
+                    print(message)
+                else:
+                    print(f"No clear buy or sell signal detected for {symbol}.")
+            # Calculate seconds until next 4-hour mark
+            now = datetime.utcnow()
+            hours_until_next_4h = (4 - (now.hour % 4)) % 4
+            minutes_until_next_4h = hours_until_next_4h * 60 - now.minute
+            if minutes_until_next_4h <= 0:
+                minutes_until_next_4h += 240  # 4*60
+            sleep_seconds = minutes_until_next_4h * 60 - now.second
+            print(f"\nSleeping for {int(sleep_seconds // 60)} minutes until next 4-hour candle...")
+            time.sleep(sleep_seconds)
+        else:
+            time.sleep(30)  # Check more frequently to catch the hour exactly
 
 if __name__ == "__main__":
     main()
