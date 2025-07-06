@@ -307,29 +307,6 @@ def check_signal_with_confidence(df, accuracies, ongoing):
     else:
         return None, 0, signals
 
-CRYPTO_SYMBOLS = [
-    "XRP/USDT", "XMR/USDT", "GMX/USDT", "LUNA/USDT", "TRX/USDT", "EIGEN/USDT",
-    "APE/USDT", "WAVES/USDT", "PLUME/USDT", "SUSHI/USDT", "DOGE/USDT", "VIRTUAL/USDT",
-    "CAKE/USDT", "GRASS/USDT", "AAVE/USDT", "SUI/USDT", "ARB/USDT", "XLM/USDT",
-    "MNT/USDT", "LTC/USDT", "NEAR/USDT"
-]
-
-def fetch_latest_ohlcv(symbol, timeframe='6h', limit=750):
-    try:
-        exchange = ccxt.kucoin()
-        exchange.load_markets()
-        if symbol not in exchange.symbols:
-            print(f"Symbol {symbol} not available on this exchange.")
-            return None
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        return df.astype(float)
-    except Exception as e:
-        print(f"Error fetching OHLCV data for {symbol}: {e}")
-        return None
-
 def format_signal_message(symbol, signal, confidence, indicator_states, indicator_hits, indicator_totals, indicator_ongoing, time_str):
     indicator_stats = []
     for name in INDICATOR_FUNCTIONS.keys():
@@ -374,19 +351,34 @@ def format_signal_message(symbol, signal, confidence, indicator_states, indicato
     )
     return message
 
+def fetch_latest_ohlcv(symbol, timeframe='6h', limit=750):
+    try:
+        exchange = ccxt.kraken()  # Use Kraken exchange here
+        exchange.load_markets()
+        if symbol not in exchange.symbols:
+            print(f"Symbol {symbol} not available on Kraken.")
+            return None
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        return df.astype(float)
+    except Exception as e:
+        print(f"Error fetching OHLCV data for {symbol}: {e}")
+        return None
+
 def main():
+    symbol = "EUR/USD"  # Kraken symbol for EUR/USD
     last_checked_hour = None
     while True:
         now = datetime.utcnow()
         if now.hour % 6 == 0 and (last_checked_hour != now.hour or last_checked_hour is None):
             last_checked_hour = now.hour
-            print(f"\nChecking signals for all symbols at {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-            for symbol in CRYPTO_SYMBOLS:
-                print(f"\n--- Checking {symbol} ---")
-                df = fetch_latest_ohlcv(symbol, timeframe='6h', limit=750)
-                if df is None or len(df) < 700:
-                    print(f"Not enough data for {symbol}, skipping.")
-                    continue
+            print(f"\nChecking signals for {symbol} at {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            df = fetch_latest_ohlcv(symbol, timeframe='6h', limit=750)
+            if df is None or len(df) < 700:
+                print(f"Not enough data for {symbol}, skipping.")
+            else:
                 df = calculate_indicators(df)
                 backtest_df = df.iloc[-751:-1]
                 accuracies, hits, totals, ongoing = get_indicator_accuracies_and_hits(backtest_df)
@@ -398,6 +390,7 @@ def main():
                     print(message)
                 else:
                     print(f"No clear buy or sell signal detected for {symbol}.")
+            # Sleep until next 6-hour candle
             now = datetime.utcnow()
             minutes_until_next_6h = ((6 - (now.hour % 6)) % 6) * 60 + (60 - now.minute)
             sleep_seconds = minutes_until_next_6h * 60
