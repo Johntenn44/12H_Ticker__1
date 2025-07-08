@@ -352,11 +352,7 @@ def format_signal_message(symbol, signal, confidence, indicator_states, indicato
     )
     return message
 
-def fetch_latest_ohlcv(symbol, timeframe='15m', limit=1500):
-    """
-    Fetch OHLCV data from Kraken for the given symbol and timeframe.
-    Increased limit to 1500 to have enough data for backtesting on 15m candles.
-    """
+def fetch_latest_ohlcv(symbol, timeframe='15m', limit=750):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
@@ -381,13 +377,12 @@ def main():
         if now.minute % 15 == 0 and (last_checked_minute != now.minute or last_checked_minute is None):
             last_checked_minute = now.minute
             print(f"\nChecking signals for {symbol} at {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-            df = fetch_latest_ohlcv(symbol, timeframe='15m', limit=1500)
-            if df is None or len(df) < 1400:
+            df = fetch_latest_ohlcv(symbol, timeframe='15m', limit=750)
+            if df is None or len(df) < 700:
                 print(f"Not enough data for {symbol}, skipping.")
             else:
                 df = calculate_indicators(df)
-                # Use last 1400 candles for backtesting (approx 15 months of 15m candles)
-                backtest_df = df.iloc[-1401:-1]
+                backtest_df = df.iloc[-751:-1]
                 accuracies, hits, totals, ongoing = get_indicator_accuracies_and_hits(backtest_df)
                 signal, confidence, indicator_states = check_signal_with_confidence(df, accuracies, ongoing)
                 if signal in ("buy", "sell"):
