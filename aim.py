@@ -352,7 +352,7 @@ def format_signal_message(symbol, signal, confidence, indicator_states, indicato
     )
     return message
 
-def fetch_latest_ohlcv(symbol, timeframe='30m', limit=750):
+def fetch_latest_ohlcv(symbol, timeframe='4h', limit=750):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
@@ -370,14 +370,14 @@ def fetch_latest_ohlcv(symbol, timeframe='30m', limit=750):
 
 def main():
     symbol = "EUR/USD"
-    last_checked_minute = None
+    last_checked_hour = None
     while True:
         now = datetime.utcnow()
-        # Run at every :00 and :30 minute mark
-        if now.minute in (0, 30) and (last_checked_minute != now.minute or last_checked_minute is None):
-            last_checked_minute = now.minute
+        # Run every 4 hours on the hour (0,4,8,12,16,20)
+        if now.hour % 4 == 0 and (last_checked_hour != now.hour or last_checked_hour is None):
+            last_checked_hour = now.hour
             print(f"\nChecking signals for {symbol} at {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-            df = fetch_latest_ohlcv(symbol, timeframe='30m', limit=750)
+            df = fetch_latest_ohlcv(symbol, timeframe='4h', limit=750)
             if df is None or len(df) < 700:
                 print(f"Not enough data for {symbol}, skipping.")
             else:
@@ -392,18 +392,17 @@ def main():
                     print(message)
                 else:
                     print(f"No clear buy or sell signal detected for {symbol}.")
-            # Calculate seconds until next :00 or :30
+            # Calculate seconds until next 4-hour mark
             now = datetime.utcnow()
-            if now.minute < 30:
-                next_run = now.replace(minute=30, second=0, microsecond=0)
-            else:
-                next_hour = (now.hour + 1) % 24
-                next_run = now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
-            sleep_seconds = (next_run - now).total_seconds()
-            print(f"\nSleeping for {int(sleep_seconds // 60)} minutes until next 30-minute candle...")
+            hours_until_next_4h = (4 - (now.hour % 4)) % 4
+            minutes_until_next_4h = hours_until_next_4h * 60 - now.minute
+            if minutes_until_next_4h <= 0:
+                minutes_until_next_4h += 240  # 4*60
+            sleep_seconds = minutes_until_next_4h * 60 - now.second
+            print(f"\nSleeping for {int(sleep_seconds // 60)} minutes until next 4-hour candle...")
             time.sleep(sleep_seconds)
         else:
-            time.sleep(10)  # Check more frequently to catch the minute mark
+            time.sleep(30)  # Check more frequently to catch the hour exactly
 
 if __name__ == "__main__":
     main()
