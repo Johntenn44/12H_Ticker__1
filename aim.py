@@ -352,7 +352,11 @@ def format_signal_message(symbol, signal, confidence, indicator_states, indicato
     )
     return message
 
-def fetch_latest_ohlcv(symbol, timeframe='4h', limit=750):
+def fetch_latest_ohlcv(symbol, timeframe='15m', limit=1500):
+    """
+    Fetch OHLCV data from Kraken for the given symbol and timeframe.
+    Increased limit to 1500 to have enough data for backtesting on 15m candles.
+    """
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
@@ -370,19 +374,20 @@ def fetch_latest_ohlcv(symbol, timeframe='4h', limit=750):
 
 def main():
     symbol = "EUR/USD"
-    last_checked_hour = None
+    last_checked_minute = None
     while True:
         now = datetime.utcnow()
-        # Run every 4 hours on the hour (0,4,8,12,16,20)
-        if now.hour % 4 == 0 and (last_checked_hour != now.hour or last_checked_hour is None):
-            last_checked_hour = now.hour
+        # Run every 15 minutes on quarter-hour marks (0,15,30,45)
+        if now.minute % 15 == 0 and (last_checked_minute != now.minute or last_checked_minute is None):
+            last_checked_minute = now.minute
             print(f"\nChecking signals for {symbol} at {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-            df = fetch_latest_ohlcv(symbol, timeframe='4h', limit=750)
-            if df is None or len(df) < 700:
+            df = fetch_latest_ohlcv(symbol, timeframe='15m', limit=1500)
+            if df is None or len(df) < 1400:
                 print(f"Not enough data for {symbol}, skipping.")
             else:
                 df = calculate_indicators(df)
-                backtest_df = df.iloc[-751:-1]
+                # Use last 1400 candles for backtesting (approx 15 months of 15m candles)
+                backtest_df = df.iloc[-1401:-1]
                 accuracies, hits, totals, ongoing = get_indicator_accuracies_and_hits(backtest_df)
                 signal, confidence, indicator_states = check_signal_with_confidence(df, accuracies, ongoing)
                 if signal in ("buy", "sell"):
@@ -392,17 +397,16 @@ def main():
                     print(message)
                 else:
                     print(f"No clear buy or sell signal detected for {symbol}.")
-            # Calculate seconds until next 4-hour mark
+            # Calculate seconds until next 15-minute mark
             now = datetime.utcnow()
-            hours_until_next_4h = (4 - (now.hour % 4)) % 4
-            minutes_until_next_4h = hours_until_next_4h * 60 - now.minute
-            if minutes_until_next_4h <= 0:
-                minutes_until_next_4h += 240  # 4*60
-            sleep_seconds = minutes_until_next_4h * 60 - now.second
-            print(f"\nSleeping for {int(sleep_seconds // 60)} minutes until next 4-hour candle...")
+            minutes_until_next_15 = (15 - (now.minute % 15)) % 15
+            if minutes_until_next_15 == 0:
+                minutes_until_next_15 = 15
+            sleep_seconds = minutes_until_next_15 * 60 - now.second
+            print(f"\nSleeping for {int(sleep_seconds // 60)} minutes until next 15-minute candle...")
             time.sleep(sleep_seconds)
         else:
-            time.sleep(30)  # Check more frequently to catch the hour exactly
+            time.sleep(10)  # Check more frequently to catch the quarter-hour exactly
 
 if __name__ == "__main__":
     main()
