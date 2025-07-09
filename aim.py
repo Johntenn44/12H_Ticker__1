@@ -8,7 +8,8 @@ import ccxt
 import pandas as pd
 import numpy as np
 from datetime import datetime
-import flask 
+from collections import deque
+from itertools import combinations
 
 # Start webserver.py subprocess for Render port binding
 webserver_path = os.path.join(os.path.dirname(__file__), 'webserver.py')
@@ -46,6 +47,8 @@ def send_telegram_message(message):
                 print(f"Error sending Telegram message to {chat_id}: {e}")
     if not sent:
         print("No TELEGRAM_CHAT_ID or TELEGRAM_CHANNEL_ID set, message not sent!")
+
+# --- Indicator calculations ---
 
 def calculate_rsi(series, period=13):
     delta = series.diff()
@@ -147,6 +150,32 @@ def calculate_bollinger_bands(close, window=20, num_std=2):
     lower_band = sma - (std * num_std)
     return upper_band, lower_band
 
+def calculate_atr(df, window=14):
+    high_low = df['high'] - df['low']
+    high_close = np.abs(df['high'] - df['close'].shift())
+    low_close = np.abs(df['low'] - df['close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = ranges.max(axis=1)
+    atr = true_range.rolling(window=window).mean()
+    return atr
+
+def detect_regime(df, ma_window=50, atr_window=14, trend_threshold=0.0001, volatility_threshold=0.002):
+    close = df['close']
+    ma = close.rolling(window=ma_window).mean()
+    if len(ma) < ma_window + 2:
+        return 'range'
+    slope = (ma.iloc[-1] - ma.iloc[-ma_window]) / ma_window
+    atr = calculate_atr(df, window=atr_window)
+    recent_atr = atr.iloc[-1]
+    avg_price = close.iloc[-ma_window:].mean()
+    rel_atr = recent_atr / avg_price if avg_price else 0
+    if abs(slope) > trend_threshold and rel_atr < volatility_threshold:
+        return 'trend'
+    elif rel_atr > volatility_threshold:
+        return 'volatile'
+    else:
+        return 'range'
+
 def calculate_indicators(df):
     df['rsi5'] = calculate_rsi(df['close'], 5)
     df['rsi13'] = calculate_rsi(df['close'], 13)
@@ -168,6 +197,8 @@ def calculate_indicators(df):
     df['bb_upper'] = upper_band
     df['bb_lower'] = lower_band
     return df
+
+# --- Indicator signal functions ---
 
 def indicator_signal_stoch_rsi(df, idx):
     k = df['stochrsi_k']
@@ -218,7 +249,28 @@ INDICATOR_FUNCTIONS = {
     'Bollinger': indicator_signal_bollinger,
 }
 
-def calculate_hits(df, indicator_func):
+INDICATOR_REGIME_PREF = {
+    'Stoch RSI': ['trend', 'volatile'],
+    'Williams %R': ['trend', 'volatile'],
+    'RSI': ['range'],
+    'KDJ': ['trend', 'volatile'],
+    'MACD': ['trend'],
+    'Bollinger': ['range', 'volatile'],
+}
+
+ROLLING_WINDOW = 100
+indicator_performance = {name: deque(maxlen=ROLLING_WINDOW) for name in INDICATOR_FUNCTIONS}
+
+def update_performance(indicator_name, correct):
+    indicator_performance[indicator_name].append(correct)
+
+def get_weight(indicator_name, regime):
+    perf = indicator_performance[indicator_name]
+    base_weight = max(0.1, sum(perf) / len(perf)) if perf else 1.0
+    regime_boost = 1.5 if regime in INDICATOR_REGIME_PREF.get(indicator_name, []) else 1.0
+    return base_weight * regime_boost
+
+def calculate_hits(df, indicator_func, indicator_name=None, update_perf=False):
     hits = 0
     total_entries = 0
     last_signal = None
@@ -229,20 +281,25 @@ def calculate_hits(df, indicator_func):
             price_now = df['close'].iloc[idx]
             price_1 = df['close'].iloc[idx + 1]
             price_2 = df['close'].iloc[idx + 2]
+            correct = False
             if signal == "up":
                 if price_1 > price_now and price_2 > price_1:
                     hits += 1
+                    correct = True
             elif signal == "down":
                 if price_1 < price_now and price_2 < price_1:
                     hits += 1
+                    correct = True
+            if update_perf and indicator_name:
+                update_performance(indicator_name, int(correct))
         last_signal = signal
     hit_rate = hits / total_entries if total_entries > 0 else 0
     return hits, total_entries, hit_rate
 
-def indicator_accuracy_and_hits(df, indicator_func, indicator_name):
+def indicator_accuracy_and_hits(df, indicator_func, indicator_name, update_perf=False):
     correct = 0
     total = 0
-    hits, total_entries, hit_rate = calculate_hits(df, indicator_func)
+    hits, total_entries, hit_rate = calculate_hits(df, indicator_func, indicator_name, update_perf)
     for idx in range(1, len(df) - 1):
         signal = indicator_func(df, idx)
         if signal not in ("up", "down"):
@@ -266,37 +323,34 @@ def indicator_accuracy_and_hits(df, indicator_func, indicator_name):
                       df['close'].iloc[idx + 2] < df['close'].iloc[idx + 1])
     return accuracy, hits, total_entries, is_ongoing
 
-def get_indicator_accuracies_and_hits(df):
+def get_indicator_accuracies_and_hits(df, update_perf=False):
     accuracies = {}
     hits = {}
     totals = {}
     ongoing = {}
     for name, func in INDICATOR_FUNCTIONS.items():
-        acc, hit, total, is_ongoing = indicator_accuracy_and_hits(df, func, name)
+        acc, hit, total, is_ongoing = indicator_accuracy_and_hits(df, func, name, update_perf)
         accuracies[name] = acc
         hits[name] = hit
         totals[name] = total
         ongoing[name] = is_ongoing
     return accuracies, hits, totals, ongoing
 
-def check_signal_with_confidence(df, accuracies, ongoing):
+def adaptive_regime_check_signal(df, regime):
     signals = {}
-    for name, func in INDICATOR_FUNCTIONS.items():
-        signals[name] = func(df, -1)
     up_weight = 0.0
     down_weight = 0.0
     total_weight = 0.0
-    for name, signal in signals.items():
-        acc = accuracies.get(name, 0.5)
-        trend_continues = ongoing.get(name, False)
-        weight_factor = 1.0 if trend_continues else 0.5
-        weighted_acc = acc * weight_factor
+    for name, func in INDICATOR_FUNCTIONS.items():
+        signal = func(df, -1)
+        signals[name] = signal
+        weight = get_weight(name, regime)
         if signal == "up":
-            up_weight += weighted_acc
-            total_weight += weighted_acc
+            up_weight += weight
+            total_weight += weight
         elif signal == "down":
-            down_weight += weighted_acc
-            total_weight += weighted_acc
+            down_weight += weight
+            total_weight += weight
     if total_weight == 0:
         return None, 0, signals
     if up_weight > down_weight:
@@ -308,7 +362,7 @@ def check_signal_with_confidence(df, accuracies, ongoing):
     else:
         return None, 0, signals
 
-def format_signal_message(symbol, signal, confidence, indicator_states, indicator_hits, indicator_totals, indicator_ongoing, time_str):
+def format_signal_message(symbol, signal, confidence, indicator_states, indicator_hits, indicator_totals, indicator_ongoing, time_str, regime, combo_accuracy=None, combo_hits=None, combo_total=None, best_combo=None, best_accuracy=None, best_correct=None):
     indicator_stats = []
     for name in INDICATOR_FUNCTIONS.keys():
         val = indicator_states.get(name)
@@ -339,14 +393,29 @@ def format_signal_message(symbol, signal, confidence, indicator_states, indicato
         for x in indicator_stats
     ]
     indicator_table = "\n".join(indicator_rows)
+    regime_disp = {
+        "trend": "📈 Trending",
+        "range": "🔄 Ranging",
+        "volatile": "⚡ Volatile"
+    }.get(regime, regime)
+    combo_msg = ""
+    if combo_accuracy is not None and combo_total is not None and combo_total > 0:
+        combo_msg = f"\n\n<b>Current Combination Accuracy:</b> {combo_accuracy:.1%} ({combo_hits}/{combo_total})"
+    best_combo_str = ', '.join(sorted(best_combo)) if best_combo else "N/A"
+    correctness_str = "✅ Correct" if best_correct else ("❌ Incorrect" if best_correct is False else "❓ Unknown")
     message = (
         f"{'🚀' if signal == 'buy' else '🔥'} <b>{'BUY' if signal == 'buy' else 'SELL'} Signal Detected</b>\n"
         f"<b>Pair:</b> <code>{symbol}</code>\n"
-        f"<b>Time:</b> <code>{time_str}</code>\n\n"
+        f"<b>Time:</b> <code>{time_str}</code>\n"
+        f"<b>Market Regime:</b> <code>{regime_disp}</code>\n\n"
         f"{'✅' if signal == 'buy' else '⚠️'} <b>Majority indicators aligned for:</b> <b>{'BUY' if signal == 'buy' else 'SELL'}</b>\n"
         f"<b>Confidence:</b> <code>{confidence:.1f}%</code>\n\n"
         f"📊 <b>Indicator Breakdown</b>\n"
-        f"<pre>{indicator_table}</pre>\n"
+        f"<pre>{indicator_table}</pre>"
+        f"{combo_msg}\n"
+        f"\n<b>Best Combo:</b> <code>{best_combo_str}</code>\n"
+        f"<b>Best Combo Accuracy:</b> {best_accuracy:.1%}\n"
+        f"<b>Latest Signal Correctness:</b> {correctness_str}\n"
         f"<i>Hits = correct predictions / total entries (past 6 months)</i>\n"
         f"<i>Ongoing trend: ✅ = yes, ❌ = no</i>"
     )
@@ -368,12 +437,116 @@ def fetch_latest_ohlcv(symbol, timeframe='15m', limit=750):
         print(f"Error fetching OHLCV data for {symbol}: {e}")
         return None
 
+# --- Combination evaluation functions ---
+
+def get_indicator_combinations(indicators, max_size=4):
+    combos = []
+    for size in range(2, max_size + 1):
+        combos.extend(combinations(indicators, size))
+    return combos
+
+def compute_regime_series(df):
+    regimes = []
+    window = 60
+    for i in range(len(df)):
+        if i < window:
+            regimes.append('range')
+        else:
+            sub_df = df.iloc[i-window:i+1]
+            regimes.append(detect_regime(sub_df))
+    return pd.Series(regimes, index=df.index)
+
+def backtest_combination(df, indicator_funcs, combo, regime, regime_series):
+    hits = 0
+    total = 0
+    for idx in range(1, len(df) - 2):
+        if regime_series.iloc[idx] != regime:
+            continue
+        signals = []
+        for ind_name in combo:
+            signal = indicator_funcs[ind_name](df, idx)
+            if signal not in ("up", "down"):
+                break
+            signals.append(signal)
+        else:
+            if len(set(signals)) == 1:
+                total += 1
+                signal = signals[0]
+                price_now = df['close'].iloc[idx]
+                price_1 = df['close'].iloc[idx + 1]
+                price_2 = df['close'].iloc[idx + 2]
+                if signal == "up" and price_1 > price_now and price_2 > price_1:
+                    hits += 1
+                elif signal == "down" and price_1 < price_now and price_2 < price_1:
+                    hits += 1
+    accuracy = hits / total if total > 0 else 0
+    return hits, total, accuracy
+
+def evaluate_all_combinations(df, regime_series, max_combo_size=4):
+    combo_stats = {}
+    indicator_names = list(INDICATOR_FUNCTIONS.keys())
+    combos = get_indicator_combinations(indicator_names, max_size=max_combo_size)
+    regimes = ['trend', 'range', 'volatile']
+    for regime in regimes:
+        for combo in combos:
+            hits, total, accuracy = backtest_combination(df, INDICATOR_FUNCTIONS, combo, regime, regime_series)
+            combo_stats[(regime, frozenset(combo))] = (hits, total, accuracy)
+    return combo_stats
+
+def rate_current_combination(df, idx, regime, combo_stats):
+    active_inds = []
+    for name, func in INDICATOR_FUNCTIONS.items():
+        signal = func(df, idx)
+        if signal in ("up", "down"):
+            active_inds.append(name)
+    if len(active_inds) < 2:
+        return None, 0, 0
+    combo_key = (regime, frozenset(active_inds))
+    hits, total, accuracy = combo_stats.get(combo_key, (0, 0, 0))
+    return accuracy, hits, total
+
+def find_best_combination(combo_stats, regime):
+    filtered = {k: v for k, v in combo_stats.items() if k[0] == regime}
+    if not filtered:
+        return None, 0, 0, 0
+    best_combo_key = max(filtered, key=lambda k: filtered[k][2])
+    hits, total, accuracy = filtered[best_combo_key]
+    return best_combo_key[1], hits, total, accuracy
+
+def check_combo_latest_signal_correctness(df, combo, idx=-1):
+    if idx < 0:
+        idx = len(df) - 1
+    signals = []
+    for ind_name in combo:
+        signal = INDICATOR_FUNCTIONS[ind_name](df, idx)
+        if signal not in ("up", "down"):
+            return None
+        signals.append(signal)
+    if len(set(signals)) != 1:
+        return None
+    combo_signal = signals[0]
+    price_now = df['close'].iloc[idx]
+    if idx + 2 >= len(df):
+        return None
+    price_1 = df['close'].iloc[idx + 1]
+    price_2 = df['close'].iloc[idx + 2]
+    if combo_signal == "up" and price_1 > price_now and price_2 > price_1:
+        return True
+    elif combo_signal == "down" and price_1 < price_now and price_2 < price_1:
+        return True
+    else:
+        return False
+
+# --- Main loop ---
+
 def main():
     symbol = "EUR/USD"
     last_checked_minute = None
+    combo_stats = None
+    regime_series = None
+
     while True:
         now = datetime.utcnow()
-        # Run every 15 minutes on quarter-hour marks (0,15,30,45)
         if now.minute % 15 == 0 and (last_checked_minute != now.minute or last_checked_minute is None):
             last_checked_minute = now.minute
             print(f"\nChecking signals for {symbol} at {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
@@ -382,17 +555,34 @@ def main():
                 print(f"Not enough data for {symbol}, skipping.")
             else:
                 df = calculate_indicators(df)
+                regime_series = compute_regime_series(df)
                 backtest_df = df.iloc[-751:-1]
-                accuracies, hits, totals, ongoing = get_indicator_accuracies_and_hits(backtest_df)
-                signal, confidence, indicator_states = check_signal_with_confidence(df, accuracies, ongoing)
+                backtest_regime_series = regime_series.loc[backtest_df.index]
+
+                combo_stats = evaluate_all_combinations(backtest_df, backtest_regime_series, max_combo_size=4)
+
+                accuracies, hits, totals, ongoing = get_indicator_accuracies_and_hits(backtest_df, update_perf=True)
+                regime = detect_regime(df)
+                signal, confidence, indicator_states = adaptive_regime_check_signal(df, regime)
+
+                best_combo, best_hits, best_total, best_accuracy = find_best_combination(combo_stats, regime)
+                best_combo_correct = None
+                if best_combo is not None:
+                    best_combo_correct = check_combo_latest_signal_correctness(df, best_combo, idx=-1)
+
                 if signal in ("buy", "sell"):
                     last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-                    message = format_signal_message(symbol, signal, confidence, indicator_states, hits, totals, ongoing, last_close_time)
+                    combo_accuracy, combo_hits, combo_total = rate_current_combination(df, -1, regime, combo_stats)
+                    message = format_signal_message(
+                        symbol, signal, confidence, indicator_states, hits, totals, ongoing,
+                        last_close_time, regime, combo_accuracy, combo_hits, combo_total,
+                        best_combo=best_combo, best_accuracy=best_accuracy, best_correct=best_combo_correct
+                    )
                     send_telegram_message(message)
                     print(message)
                 else:
-                    print(f"No clear buy or sell signal detected for {symbol}.")
-            # Calculate seconds until next 15-minute mark
+                    print(f"No clear buy or sell signal detected for {symbol}. Regime: {regime}")
+
             now = datetime.utcnow()
             minutes_until_next_15 = (15 - (now.minute % 15)) % 15
             if minutes_until_next_15 == 0:
@@ -401,7 +591,7 @@ def main():
             print(f"\nSleeping for {int(sleep_seconds // 60)} minutes until next 15-minute candle...")
             time.sleep(sleep_seconds)
         else:
-            time.sleep(10)  # Check more frequently to catch the quarter-hour exactly
+            time.sleep(10)
 
 if __name__ == "__main__":
     main()
