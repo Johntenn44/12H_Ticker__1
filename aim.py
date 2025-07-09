@@ -421,7 +421,7 @@ def format_signal_message(symbol, signal, confidence, indicator_states, indicato
     )
     return message
 
-def fetch_latest_ohlcv(symbol, timeframe='15m', limit=750):
+def fetch_latest_ohlcv(symbol, timeframe='5m', limit=750):
     try:
         exchange = ccxt.kraken()
         exchange.load_markets()
@@ -436,8 +436,6 @@ def fetch_latest_ohlcv(symbol, timeframe='15m', limit=750):
     except Exception as e:
         print(f"Error fetching OHLCV data for {symbol}: {e}")
         return None
-
-# --- Combination evaluation functions ---
 
 def get_indicator_combinations(indicators, max_size=4):
     combos = []
@@ -537,20 +535,17 @@ def check_combo_latest_signal_correctness(df, combo, idx=-1):
     else:
         return False
 
-# --- Main loop ---
-
 def main():
     symbol = "EUR/USD"
     last_checked_minute = None
-    combo_stats = None
-    regime_series = None
 
     while True:
         now = datetime.utcnow()
-        if now.minute % 15 == 0 and (last_checked_minute != now.minute or last_checked_minute is None):
+        # Run every 5 minutes on 5-minute marks (0,5,10,15,...)
+        if now.minute % 5 == 0 and (last_checked_minute != now.minute or last_checked_minute is None):
             last_checked_minute = now.minute
             print(f"\nChecking signals for {symbol} at {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-            df = fetch_latest_ohlcv(symbol, timeframe='15m', limit=750)
+            df = fetch_latest_ohlcv(symbol, timeframe='5m', limit=750)
             if df is None or len(df) < 700:
                 print(f"Not enough data for {symbol}, skipping.")
             else:
@@ -570,9 +565,10 @@ def main():
                 if best_combo is not None:
                     best_combo_correct = check_combo_latest_signal_correctness(df, best_combo, idx=-1)
 
+                combo_accuracy, combo_hits, combo_total = rate_current_combination(df, -1, regime, combo_stats)
+
                 if signal in ("buy", "sell"):
                     last_close_time = df.index[-1].strftime('%Y-%m-%d %H:%M UTC')
-                    combo_accuracy, combo_hits, combo_total = rate_current_combination(df, -1, regime, combo_stats)
                     message = format_signal_message(
                         symbol, signal, confidence, indicator_states, hits, totals, ongoing,
                         last_close_time, regime, combo_accuracy, combo_hits, combo_total,
@@ -584,11 +580,11 @@ def main():
                     print(f"No clear buy or sell signal detected for {symbol}. Regime: {regime}")
 
             now = datetime.utcnow()
-            minutes_until_next_15 = (15 - (now.minute % 15)) % 15
-            if minutes_until_next_15 == 0:
-                minutes_until_next_15 = 15
-            sleep_seconds = minutes_until_next_15 * 60 - now.second
-            print(f"\nSleeping for {int(sleep_seconds // 60)} minutes until next 15-minute candle...")
+            minutes_until_next_5 = (5 - (now.minute % 5)) % 5
+            if minutes_until_next_5 == 0:
+                minutes_until_next_5 = 5
+            sleep_seconds = minutes_until_next_5 * 60 - now.second
+            print(f"\nSleeping for {int(sleep_seconds // 60)} minutes until next 5-minute candle...")
             time.sleep(sleep_seconds)
         else:
             time.sleep(10)
