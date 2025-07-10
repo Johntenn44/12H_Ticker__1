@@ -11,7 +11,6 @@ from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
-
 import xgboost as xgb
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score
@@ -53,14 +52,13 @@ CRYPTO_SYMBOLS = [
     "MNT/USDT", "LTC/USDT", "NEAR/USDT"
 ]
 
-# --- Telegram Functions ---
+# --- Telegram Messaging ---
 def send_telegram_message(message, chat_id_override=None):
     if not TELEGRAM_BOT_TOKEN:
         print("TELEGRAM_BOT_TOKEN not set! Cannot send messages.")
         return
 
     MAX_MESSAGE_LENGTH = 4096
-
     target_chat_ids = []
     if chat_id_override:
         target_chat_ids = [chat_id_override]
@@ -113,9 +111,148 @@ def send_telegram_message(message, chat_id_override=None):
         print("No messages were generated or sent.")
 
 # --- Indicator Calculations ---
-# (Keep your existing indicator functions here, unchanged)
+def calculate_rsi(series, period=13):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(com=period-1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period-1, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_stoch_rsi(df, rsi_len=13, stoch_len=8, smooth_k=5, smooth_d=3):
+    rsi = calculate_rsi(df['close'], rsi_len)
+    min_rsi = rsi.rolling(window=stoch_len).min()
+    max_rsi = rsi.rolling(window=stoch_len).max()
+    denom = max_rsi - min_rsi
+    denom = denom.replace(0, np.nan)
+    stoch_rsi = (rsi - min_rsi) / denom * 100
+    stoch_rsi = stoch_rsi.fillna(method='ffill')
+    k = stoch_rsi.rolling(window=smooth_k).mean()
+    d = k.rolling(window=smooth_d).mean()
+    return k, d
+
+def calculate_multi_wr(df, lengths=[3, 13, 144, 8, 233, 55]):
+    wr_dict = {}
+    for length in lengths:
+        highest_high = df['high'].rolling(window=length).max()
+        lowest_low = df['low'].rolling(window=length).min()
+        denom = highest_high - lowest_low
+        denom = denom.replace(0, np.nan)
+        wr = (highest_high - df['close']) / denom * -100
+        wr_dict[length] = wr.fillna(method='ffill')
+    return wr_dict
+
+def analyze_wr_relative_positions(wr_dict, idx=-1):
+    try:
+        wr_8 = wr_dict[8].iloc[idx]
+        wr_3 = wr_dict[3].iloc[idx]
+        wr_144 = wr_dict[144].iloc[idx]
+        wr_233 = wr_dict[233].iloc[idx]
+        wr_55 = wr_dict[55].iloc[idx]
+        if any(pd.isna([wr_8, wr_3, wr_144, wr_233, wr_55])):
+            return None
+    except (KeyError, IndexError, AttributeError):
+        return None
+
+    if wr_8 > wr_233 and wr_3 > wr_233 and wr_8 > wr_144 and wr_3 > wr_144:
+        return "up"
+    elif wr_8 < wr_55 and wr_3 < wr_55:
+        return "down"
+    else:
+        return None
+
+def calculate_kdj(df, length=5, ma1=8, ma2=8):
+    low_min = df['low'].rolling(window=length, min_periods=1).min()
+    high_max = df['high'].rolling(window=length, min_periods=1).max()
+    denom = (high_max - low_min)
+    denom = denom.replace(0, np.nan)
+    rsv = (df['close'] - low_min) / denom * 100
+    rsv = rsv.fillna(method='ffill')
+    k = rsv.ewm(span=ma1, adjust=False).mean()
+    d = k.ewm(span=ma2, adjust=False).mean()
+    j = 3 * k - 2 * d
+    return k, d, j
+
+def analyze_stoch_rsi_trend(k, d, idx=-1):
+    if pd.isna(k.iloc[idx]) or pd.isna(d.iloc[idx]):
+        return None
+    if k.iloc[idx] > d.iloc[idx]:
+        return "up"
+    elif k.iloc[idx] < d.iloc[idx]:
+        return "down"
+    else:
+        return None
+
+def analyze_rsi_trend(rsi5, rsi13, rsi21, idx=-1):
+    try:
+        if pd.isna(rsi5.iloc[idx]) or pd.isna(rsi13.iloc[idx]) or pd.isna(rsi21.iloc[idx]):
+            return None
+        if rsi5.iloc[idx] > rsi13.iloc[idx] > rsi21.iloc[idx]:
+            return "up"
+        elif rsi5.iloc[idx] < rsi13.iloc[idx] < rsi21.iloc[idx]:
+            return "down"
+        else:
+            return None
+    except IndexError:
+        return None
+
+def analyze_kdj_trend(k, d, j, idx=-1):
+    try:
+        if pd.isna(k.iloc[idx]) or pd.isna(d.iloc[idx]) or pd.isna(j.iloc[idx]):
+            return None
+        if j.iloc[idx] > k.iloc[idx] and j.iloc[idx] > d.iloc[idx]:
+            return "up"
+        elif j.iloc[idx] < k.iloc[idx] and j.iloc[idx] < d.iloc[idx]:
+            return "down"
+        else:
+            return None
+    except IndexError:
+        return None
+
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line, signal_line
+
+def calculate_bollinger_bands(close, window=20, num_std=2):
+    sma = close.rolling(window=window).mean()
+    std = close.rolling(window=window).std()
+    upper_band = sma + (std * num_std)
+    lower_band = sma - (std * num_std)
+    return upper_band, lower_band
+
+def calculate_indicators(df):
+    df['close'] = df['close'].astype(float)
+    df['rsi5'] = calculate_rsi(df['close'], 5)
+    df['rsi13'] = calculate_rsi(df['close'], 13)
+    df['rsi21'] = calculate_rsi(df['close'], 21)
+    k, d = calculate_stoch_rsi(df, rsi_len=13, stoch_len=8, smooth_k=5, smooth_d=3)
+    df['stochrsi_k'] = k
+    df['stochrsi_d'] = d
+    wr_dict = calculate_multi_wr(df, lengths=[3, 13, 144, 8, 233, 55])
+    for length, series in wr_dict.items():
+        df[f'wr_{length}'] = series
+    kdj_k, kdj_d, kdj_j = calculate_kdj(df, length=5, ma1=8, ma2=8)
+    df['kdj_k'] = kdj_k
+    df['kdj_d'] = kdj_d
+    df['kdj_j'] = kdj_j
+    macd_line, macd_signal = calculate_macd(df['close'])
+    df['macd_line'] = macd_line
+    df['macd_signal'] = macd_signal
+    upper_band, lower_band = calculate_bollinger_bands(df['close'])
+    df['bb_upper'] = upper_band
+    df['bb_lower'] = lower_band
+    return df
 
 # --- ML and Backtest Globals ---
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import accuracy_score
+import xgboost as xgb
+
 ml_training_X = deque(maxlen=1000)
 ml_training_y = deque(maxlen=1000)
 ml_model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
@@ -123,10 +260,16 @@ ml_model_trained = False
 ml_model_lock = threading.Lock()
 
 ml_retrain_count = 0
-ml_retrain_performance = deque(maxlen=10)  # Store last 10 retrain accuracies
+ml_retrain_performance = deque(maxlen=10)
 
-# --- Indicator Functions Mapping ---
-# (Keep your INDICATOR_FUNCTIONS dictionary unchanged)
+INDICATOR_FUNCTIONS = {
+    'Stoch RSI': indicator_signal_stoch_rsi,
+    'Williams %R': indicator_signal_wr,
+    'RSI': indicator_signal_rsi,
+    'KDJ': indicator_signal_kdj,
+    'MACD': indicator_signal_macd,
+    'Bollinger': indicator_signal_bollinger,
+}
 
 def indicator_signals_to_features(indicator_signals):
     features = []
@@ -153,7 +296,6 @@ def cross_validate_and_train(X, y):
         acc = accuracy_score(y_val, preds)
         accuracies.append(acc)
     avg_acc = np.mean(accuracies)
-    # Train final model on all data
     ml_model.fit(X, y)
     ml_model_trained = True
     ml_retrain_count += 1
@@ -209,9 +351,49 @@ def update_performance_and_ml_from_backtest(df):
         add_ml_training_sample(current_indicator_signals, price_move)
     update_ml_model()
 
-# --- Fetch OHLCV and other functions ---
-# (Keep your existing fetch_latest_ohlcv, calculate_indicators, get_market_regime, update_indicator_performance_regime, get_indicator_weight_regime unchanged)
+# --- Market Regime and Indicator Performance ---
+def get_market_regime(df, window=50, threshold=0.02):
+    if len(df) < window:
+        return "unknown"
+    returns = df['close'].pct_change()
+    vol = returns.rolling(window=window).std()
+    current_vol = vol.iloc[-1]
+    return "high_vol" if current_vol > threshold else "low_vol"
 
+indicator_performance_regime = defaultdict(lambda: {'high_vol': deque(maxlen=200), 'low_vol': deque(maxlen=200)})
+
+def update_indicator_performance_regime(indicator_name, regime, was_correct):
+    if regime == "unknown": return
+    indicator_performance_regime[indicator_name][regime].append(1 if was_correct else 0)
+
+def get_indicator_weight_regime(indicator_name, regime):
+    if regime == "unknown": return 0.5
+    perf = indicator_performance_regime[indicator_name][regime]
+    return sum(perf) / len(perf) if perf else 0.5
+
+# --- Fetch OHLCV ---
+def fetch_latest_ohlcv(symbol, timeframe='4h', limit=750):
+    try:
+        with exchange_lock:
+            if symbol not in exchange.symbols:
+                print(f"Symbol {symbol} not available on {exchange.id}.")
+                return None
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        if not ohlcv:
+            print(f"No OHLCV data returned for {symbol}.")
+            return None
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df.dropna(subset=['close'], inplace=True)
+        return df
+    except Exception as e:
+        print(f"Error fetching OHLCV for {symbol}: {e}")
+        return None
+
+# --- Retrain Summary Message ---
 def format_retrain_summary_message(timestamp_str):
     if ml_retrain_count == 0:
         return "<i>No ML retraining has occurred yet.</i>"
@@ -234,6 +416,7 @@ def seconds_until_next_4h_utc():
     delta = next_run - now
     return max(delta.total_seconds(), 0)
 
+# --- Main loop ---
 def main():
     try:
         while True:
