@@ -12,7 +12,6 @@ from sklearn.linear_model import LogisticRegression
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
-import random
 
 # --- Global Configurations ---
 webserver_path = os.path.join(os.path.dirname(__file__), 'webserver.py')
@@ -248,18 +247,25 @@ def calculate_indicators(df):
     df['bb_lower'] = lower_band
     return df
 
-def indicator_signal_stoch_rsi(df, idx):
-    return analyze_stoch_rsi_trend(df['stochrsi_k'], df['stochrsi_d'], idx)
+# --- ML and Backtest Globals ---
+ml_training_X = deque(maxlen=1000)
+ml_training_y = deque(maxlen=1000)
+ml_model = LogisticRegression(solver='liblinear', random_state=42)
+ml_model_trained = False
+ml_model_lock = threading.Lock()
 
-def indicator_signal_wr(df, idx):
-    wr_dict = {length: df[f'wr_{length}'] for length in [3, 13, 144, 8, 233, 55]}
-    return analyze_wr_relative_positions(wr_dict, idx)
+ml_retrain_count = 0  # Count how many times retrained
+ml_retrain_performance = deque(maxlen=10)  # Store last 10 retrain accuracies (0-1 scale)
 
-def indicator_signal_rsi(df, idx):
-    return analyze_rsi_trend(df['rsi5'], df['rsi13'], df['rsi21'], idx)
-
-def indicator_signal_kdj(df, idx):
-    return analyze_kdj_trend(df['kdj_k'], df['kdj_d'], df['kdj_j'], idx)
+# --- Indicator functions mapping ---
+INDICATOR_FUNCTIONS = {
+    'Stoch RSI': lambda df, idx: analyze_stoch_rsi_trend(df['stochrsi_k'], df['stochrsi_d'], idx),
+    'Williams %R': lambda df, idx: analyze_wr_relative_positions({length: df[f'wr_{length}'] for length in [3,13,144,8,233,55]}, idx),
+    'RSI': lambda df, idx: analyze_rsi_trend(df['rsi5'], df['rsi13'], df['rsi21'], idx),
+    'KDJ': lambda df, idx: analyze_kdj_trend(df['kdj_k'], df['kdj_d'], df['kdj_j'], idx),
+    'MACD': lambda df, idx: indicator_signal_macd(df, idx),
+    'Bollinger': lambda df, idx: indicator_signal_bollinger(df, idx),
+}
 
 def indicator_signal_macd(df, idx):
     macd_line = df['macd_line']
@@ -286,40 +292,7 @@ def indicator_signal_bollinger(df, idx):
     else:
         return None
 
-INDICATOR_FUNCTIONS = {
-    'Stoch RSI': indicator_signal_stoch_rsi,
-    'Williams %R': indicator_signal_wr,
-    'RSI': indicator_signal_rsi,
-    'KDJ': indicator_signal_kdj,
-    'MACD': indicator_signal_macd,
-    'Bollinger': indicator_signal_bollinger,
-}
-
-def get_market_regime(df, window=50, threshold=0.02):
-    if len(df) < window:
-        return "unknown"
-    returns = df['close'].pct_change()
-    vol = returns.rolling(window=window).std()
-    current_vol = vol.iloc[-1]
-    return "high_vol" if current_vol > threshold else "low_vol"
-
-indicator_performance_regime = defaultdict(lambda: {'high_vol': deque(maxlen=200), 'low_vol': deque(maxlen=200)})
-
-def update_indicator_performance_regime(indicator_name, regime, was_correct):
-    if regime == "unknown": return
-    indicator_performance_regime[indicator_name][regime].append(1 if was_correct else 0)
-
-def get_indicator_weight_regime(indicator_name, regime):
-    if regime == "unknown": return 0.5
-    perf = indicator_performance_regime[indicator_name][regime]
-    return sum(perf) / len(perf) if perf else 0.5
-
-ml_training_X = deque(maxlen=1000)
-ml_training_y = deque(maxlen=1000)
-ml_model = LogisticRegression(solver='liblinear', random_state=42)
-ml_model_trained = False
-ml_model_lock = threading.Lock()
-
+# --- ML Functions ---
 def indicator_signals_to_features(indicator_signals):
     features = []
     for name in INDICATOR_FUNCTIONS.keys():
@@ -333,12 +306,18 @@ def indicator_signals_to_features(indicator_signals):
     return np.array(features).reshape(1, -1)
 
 def update_ml_model():
-    global ml_model_trained
+    global ml_model_trained, ml_retrain_count
     with ml_model_lock:
         if len(ml_training_X) > len(INDICATOR_FUNCTIONS) * 5:
             try:
-                ml_model.fit(np.array(list(ml_training_X)), np.array(list(ml_training_y)))
+                X = np.array(list(ml_training_X))
+                y = np.array(list(ml_training_y))
+                ml_model.fit(X, y)
                 ml_model_trained = True
+                ml_retrain_count += 1
+                accuracy = ml_model.score(X, y)
+                ml_retrain_performance.append(accuracy)
+                print(f"ML model retrained {ml_retrain_count} times. Latest accuracy: {accuracy:.2%}")
             except ValueError:
                 ml_model_trained = False
         else:
@@ -354,63 +333,7 @@ def add_ml_training_sample(indicator_signals, price_move):
     ml_training_X.append(features)
     ml_training_y.append(1 if price_move > 0 else 0)
 
-def ml_predict_signal(indicator_signals):
-    if not ml_model_trained:
-        return None, 0.0
-    features = indicator_signals_to_features(indicator_signals)
-    try:
-        proba = ml_model.predict_proba(features)[0]
-        if proba[1] > 0.55:
-            signal = "buy"
-        elif proba[0] > 0.55:
-            signal = "sell"
-        else:
-            signal = None
-        confidence = max(proba)
-        return signal, confidence * 100
-    except Exception:
-        return None, 0.0
-
-def adaptive_check_signal_with_regime(df):
-    current_regime = get_market_regime(df)
-    current_indicator_signals = {name: func(df, -1) for name, func in INDICATOR_FUNCTIONS.items()}
-    ml_signal, ml_confidence = ml_predict_signal(current_indicator_signals)
-    if ml_signal:
-        return ml_signal, ml_confidence, current_indicator_signals, current_regime
-
-    up_weight, down_weight = 0.0, 0.0
-    total_relevant_weight = 0.0
-    for name, signal in current_indicator_signals.items():
-        weight = get_indicator_weight_regime(name, current_regime)
-        if signal == "up":
-            up_weight += weight
-            total_relevant_weight += weight
-        elif signal == "down":
-            down_weight += weight
-            total_relevant_weight += weight
-
-    fallback_signal = None
-    fallback_confidence = 0.0
-    if total_relevant_weight > 0.1:
-        if up_weight > down_weight * 1.2:
-            fallback_signal = "buy"
-            fallback_confidence = (up_weight / total_relevant_weight) * 100
-        elif down_weight > up_weight * 1.2:
-            fallback_signal = "sell"
-            fallback_confidence = (down_weight / total_relevant_weight) * 100
-
-    if fallback_signal is None:
-        all_up = all(s == "up" for s in current_indicator_signals.values() if s is not None)
-        all_down = all(s == "down" for s in current_indicator_signals.values() if s is not None)
-        if all_up and len([s for s in current_indicator_signals.values() if s is not None]) > 0:
-            fallback_signal = "buy"
-            fallback_confidence = 75.0
-        elif all_down and len([s for s in current_indicator_signals.values() if s is not None]) > 0:
-            fallback_signal = "sell"
-            fallback_confidence = 75.0
-
-    return fallback_signal, fallback_confidence, current_indicator_signals, current_regime
-
+# --- Backtest and Performance Update ---
 def update_performance_and_ml_from_backtest(df):
     start_idx = max(50, 0)
     if len(df) < start_idx + 2:
@@ -432,6 +355,27 @@ def update_performance_and_ml_from_backtest(df):
         add_ml_training_sample(current_indicator_signals, price_move)
     update_ml_model()
 
+# --- Market Regime and Indicator Performance ---
+def get_market_regime(df, window=50, threshold=0.02):
+    if len(df) < window:
+        return "unknown"
+    returns = df['close'].pct_change()
+    vol = returns.rolling(window=window).std()
+    current_vol = vol.iloc[-1]
+    return "high_vol" if current_vol > threshold else "low_vol"
+
+indicator_performance_regime = defaultdict(lambda: {'high_vol': deque(maxlen=200), 'low_vol': deque(maxlen=200)})
+
+def update_indicator_performance_regime(indicator_name, regime, was_correct):
+    if regime == "unknown": return
+    indicator_performance_regime[indicator_name][regime].append(1 if was_correct else 0)
+
+def get_indicator_weight_regime(indicator_name, regime):
+    if regime == "unknown": return 0.5
+    perf = indicator_performance_regime[indicator_name][regime]
+    return sum(perf) / len(perf) if perf else 0.5
+
+# --- Fetch OHLCV ---
 def fetch_latest_ohlcv(symbol, timeframe='4h', limit=750):
     try:
         with exchange_lock:
@@ -449,191 +393,26 @@ def fetch_latest_ohlcv(symbol, timeframe='4h', limit=750):
             df[col] = pd.to_numeric(df[col], errors='coerce')
         df.dropna(subset=['close'], inplace=True)
         return df
-    except ccxt.NetworkError as e:
-        print(f"Network error fetching OHLCV for {symbol}: {e}. Retrying might help.")
-        return None
-    except ccxt.ExchangeError as e:
-        print(f"Exchange error fetching OHLCV for {symbol}: {e}. Check symbol or exchange status.")
-        return None
     except Exception as e:
-        print(f"An unexpected error occurred fetching OHLCV for {symbol}: {e}")
+        print(f"Error fetching OHLCV for {symbol}: {e}")
         return None
 
-# --- Unicode Font Generators ---
-def to_squared(text):
-    squared = {
-        'A': '🄰', 'B': '🄱', 'C': '🄲', 'D': '🄳', 'E': '🄴', 'F': '🄵', 'G': '🄶',
-        'H': '🄷', 'I': '🄸', 'J': '🄹', 'K': '🄺', 'L': '🄻', 'M': '🄼', 'N': '🄽',
-        'O': '🄾', 'P': '🄿', 'Q': '🅀', 'R': '🅁', 'S': '🅂', 'T': '🅃', 'U': '🅄',
-        'V': '🅅', 'W': '🅆', 'X': '🅇', 'Y': '🅈', 'Z': '🅉',
-        ' ': ' '
-    }
-    return ''.join(squared.get(c.upper(), c) for c in text)
-
-def to_bold_squared(text):
-    bold_squared = {
-        'A': '🅰', 'B': '🅱', 'C': '🅲', 'D': '🅳', 'E': '🅴', 'F': '🅵', 'G': '🅶',
-        'H': '🅷', 'I': '🅸', 'J': '🅹', 'K': '🅺', 'L': '🅻', 'M': '🅼', 'N': '🅽',
-        'O': '🅾', 'P': '🅿', 'Q': '🆀', 'R': '🆁', 'S': '🆂', 'T': '🆃', 'U': '🆄',
-        'V': '🆅', 'W': '🆆', 'X': '🆇', 'Y': '🆈', 'Z': '🆉',
-        ' ': ' '
-    }
-    return ''.join(bold_squared.get(c.upper(), c) for c in text)
-
-def to_double_outline(text):
-    double_outline = {
-        'A': '🄰', 'B': '🄱', 'C': '🄲', 'D': '🄳', 'E': '🄴', 'F': '🄵', 'G': '🄶',
-        'H': '🄷', 'I': '🄸', 'J': '🄹', 'K': '🄺', 'L': '🄻', 'M': '🄼', 'N': '🄽',
-        'O': '🄾', 'P': '🄿', 'Q': '🅀', 'R': '🅁', 'S': '🅂', 'T': '🅃', 'U': '🅄',
-        'V': '🅅', 'W': '🅆', 'X': '🅇', 'Y': '🅈', 'Z': '🅉',
-        ' ': ' '
-    }
-    return ''.join(double_outline.get(c.upper(), c) for c in text)
-
-def to_circled(text):
-    circled = {
-        'A': 'Ⓐ', 'B': 'Ⓑ', 'C': 'Ⓒ', 'D': 'Ⓓ', 'E': 'Ⓔ', 'F': 'Ⓕ', 'G': 'Ⓖ',
-        'H': 'Ⓗ', 'I': 'Ⓘ', 'J': 'Ⓙ', 'K': 'Ⓚ', 'L': 'Ⓛ', 'M': 'Ⓜ', 'N': 'Ⓝ',
-        'O': 'Ⓞ', 'P': 'Ⓟ', 'Q': 'Ⓠ', 'R': 'Ⓡ', 'S': 'Ⓢ', 'T': 'Ⓣ', 'U': 'Ⓤ',
-        'V': 'Ⓥ', 'W': 'Ⓦ', 'X': 'Ⓧ', 'Y': 'Ⓨ', 'Z': 'Ⓩ',
-        ' ': ' '
-    }
-    return ''.join(circled.get(c.upper(), c) for c in text)
-
-def random_unicode_font(text):
-    fonts = [to_squared, to_bold_squared, to_double_outline, to_circled]
-    font_func = random.choice(fonts)
-    return font_func(text)
-
-# --- Message Formatting with Unicode Fonts ---
-def format_single_coin_detail(symbol, signal, confidence, indicator_states, regime, current_price_str):
-    signal_emoji = "🟢 BUY" if signal == 'buy' else "🔴 SELL"
-    regime_emoji = "📈 High Volatility" if regime == "high_vol" else "📉 Low Volatility" if regime == "low_vol" else "❓ Unknown"
-    commentary = {
-        "buy": [
-            "Momentum is building up! 🚀",
-            "Potential breakout ahead! 📈",
-            "Bulls are taking charge! 🐂"
-        ],
-        "sell": [
-            "Caution: Downtrend detected! ⚠️",
-            "Bears are in control. 🐻",
-            "Possible pullback incoming. 🔻"
-        ]
-    }
-    comment = random.choice(commentary[signal]) if signal in commentary else ""
-
-    indicator_details = []
-    for name, state in indicator_states.items():
-        if state == "up":
-            indicator_details.append(f"  • {name}: ✅ Up")
-        elif state == "down":
-            indicator_details.append(f"  • {name}: ❌ Down")
-        else:
-            indicator_details.append(f"  • {name}: ⚪ Neutral")
-    details_str = "\n".join(indicator_details)
-    return (
-        f"<b>{symbol} | {signal_emoji} ({confidence:.1f}%)</b>\n"
-        f"  <b>Price:</b> <code>{current_price_str}</code>\n"
-        f"  <b>Market:</b> {regime_emoji}\n"
-        f"  <i>{comment}</i>\n"
-        f"  <u>Indicators:</u>\n{details_str}\n"
-    )
-
-def format_summary_message(coin_results, timestamp_str):
-    # Insert a random styled phrase at the top
-    styled_phrase = random_unicode_font("I LIKE YOU")
-
-    if not coin_results:
-        return (
-            f"{styled_phrase}\n\n"
-            f"<b>📊 Market Scan @ {timestamp_str} (4h TF)</b>\n\n"
-            f"<i>No strong BUY/SELL signals detected across monitored assets.</i>\n"
-            f"<i>Market appears to be indecisive or flat. Stay patient and manage risk!</i>"
-        )
-    sorted_results = sorted(coin_results, key=lambda x: x['confidence'], reverse=True)
-
-    hour = datetime.utcnow().hour
-    if 5 <= hour < 12:
-        greeting = "🌅 Good morning, trader!"
-    elif 12 <= hour < 18:
-        greeting = "🌞 Good afternoon, trader!"
+# --- Retrain Summary Message ---
+def format_retrain_summary_message(timestamp_str):
+    if ml_retrain_count == 0:
+        retrain_msg = "<i>No ML retraining has occurred yet.</i>"
     else:
-        greeting = "🌙 Good evening, trader!"
-
-    header = (
-        f"{styled_phrase}\n\n"
-        f"{greeting}\n"
-        f"<b>📊 Crypto Signals Scan @ {timestamp_str} (4h TF)</b>\n"
-        f"<i>Top 5 trading opportunities, ranked by confidence.</i>\n\n"
-        f"🚀 <b>{len(sorted_results)}</b> active signals detected.\n"
-    )
-
-    global_performance_summary = "<b>🧠 System Overview:</b>\n"
-    for name, regimes in indicator_performance_regime.items():
-        high_vol_acc = get_indicator_weight_regime(name, 'high_vol')
-        low_vol_acc = get_indicator_weight_regime(name, 'low_vol')
-        global_performance_summary += (
-            f"  • {name}: High Vol: {high_vol_acc:.1%}, Low Vol: {low_vol_acc:.1%}\n"
+        avg_perf = np.mean(ml_retrain_performance) if ml_retrain_performance else 0.0
+        improvement_pct = avg_perf * 100
+        retrain_msg = (
+            f"<b>🤖 ML Retrain Summary @ {timestamp_str} (4h TF)</b>\n\n"
+            f"• Total Retrains: <b>{ml_retrain_count}</b>\n"
+            f"• Average Training Accuracy: <b>{improvement_pct:.2f}%</b>\n\n"
+            f"<i>Model adapts as new data arrives. Monitor retrain frequency and accuracy.</i>"
         )
-    global_performance_summary += f"  • ML Model: {'✅ Ready' if ml_model_trained else '⏳ Training...'}\n\n"
+    return retrain_msg
 
-    top_n = 5
-    detailed_signals_sections = []
-    for i in range(min(top_n, len(sorted_results))):
-        res = sorted_results[i]
-        price_str = f"{res['current_price']:.4f}" if res['current_price'] < 10 else f"{res['current_price']:.2f}"
-        detailed_signals_sections.append(
-            format_single_coin_detail(
-                res['symbol'], res['signal'], res['confidence'],
-                res['indicator_states'], res['regime'], price_str
-            )
-        )
-    detailed_signals_block = "<b>⭐ Top 5 Signals:</b>\n" + "\n".join(detailed_signals_sections) + "\n"
-
-    closing_notes = [
-        "<i>Remember: Markets are dynamic. Stay sharp and manage your risk!</i>",
-        "<i>Trade smart, stay safe. This is not financial advice.</i>",
-        "<i>Opportunities come and go. Patience is key!</i>"
-    ]
-    closing_note = random.choice(closing_notes)
-
-    full_message = header + global_performance_summary + detailed_signals_block + closing_note
-    return full_message
-
-def process_symbol(symbol):
-    print(f"Processing {symbol}...")
-    df = fetch_latest_ohlcv(symbol, timeframe='4h', limit=750)
-    if df is None or len(df) < 100:
-        print(f"Not enough recent data for {symbol} after filtering ({len(df) if df is not None else 0} bars), skipping.")
-        return None
-    required_cols = ['open', 'high', 'low', 'close', 'volume']
-    if not all(col in df.columns for col in required_cols):
-        print(f"Missing required OHLCV columns for {symbol}, skipping.")
-        return None
-    df = calculate_indicators(df.copy())
-    backtest_data_start_idx = max(0, len(df) - 750)
-    backtest_df_subset = df.iloc[backtest_data_start_idx:]
-    if len(backtest_df_subset) > 50:
-        update_performance_and_ml_from_backtest(backtest_df_subset)
-    else:
-        print(f"Skipping backtest update for {symbol}, not enough data in backtest window.")
-    signal, confidence, indicator_states, regime = adaptive_check_signal_with_regime(df)
-    if signal in ("buy", "sell") and confidence >= 55.0:
-        current_price = df['close'].iloc[-1]
-        print(f"Signal detected for {symbol}: {signal} with {confidence:.1f}% confidence.")
-        return {
-            "symbol": symbol,
-            "signal": signal,
-            "confidence": confidence,
-            "indicator_states": indicator_states,
-            "regime": regime,
-            "current_price": current_price
-        }
-    else:
-        print(f"No strong signal for {symbol} (Signal: {signal}, Confidence: {confidence:.1f}%).")
-        return None
-
+# --- Time until next 4h UTC ---
 def seconds_until_next_4h_utc():
     now = datetime.utcnow()
     next_hour = (now.hour // 4 + 1) * 4
@@ -645,41 +424,45 @@ def seconds_until_next_4h_utc():
     delta = next_run - now
     return max(delta.total_seconds(), 0)
 
+# --- Main loop ---
 def main():
     try:
         while True:
             start_time = datetime.utcnow()
-            print(f"\nInitiating crypto signal scan at {start_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            print(f"\nStarting backtest & retrain summary at {start_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
             MAX_WORKERS = min(16, os.cpu_count() * 2 + 1)
             print(f"Using {MAX_WORKERS} threads for parallel processing.")
 
-            coin_results = []
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                future_to_symbol = {executor.submit(process_symbol, symbol): symbol for symbol in CRYPTO_SYMBOLS}
+                future_to_symbol = {executor.submit(fetch_latest_ohlcv, symbol, '4h', 750): symbol for symbol in CRYPTO_SYMBOLS}
                 for future in as_completed(future_to_symbol):
                     symbol = future_to_symbol[future]
                     try:
-                        result = future.result()
-                        if result:
-                            coin_results.append(result)
+                        df = future.result()
+                        if df is not None and len(df) >= 100:
+                            df = calculate_indicators(df.copy())
+                            backtest_data_start_idx = max(0, len(df) - 750)
+                            backtest_df_subset = df.iloc[backtest_data_start_idx:]
+                            if len(backtest_df_subset) > 50:
+                                update_performance_and_ml_from_backtest(backtest_df_subset)
+                            else:
+                                print(f"Skipping backtest for {symbol}, insufficient data.")
+                        else:
+                            print(f"Insufficient data for {symbol}, skipping backtest.")
                     except Exception as exc:
-                        print(f'{symbol} generated an exception: {exc}')
+                        print(f"{symbol} backtest exception: {exc}")
 
-            end_time = datetime.utcnow()
-            duration = (end_time - start_time).total_seconds()
-            print(f"\nScan completed in {duration:.2f} seconds.")
-
-            summary_message = format_summary_message(coin_results, start_time.strftime('%Y-%m-%d %H:%M UTC'))
+            summary_message = format_retrain_summary_message(start_time.strftime('%Y-%m-%d %H:%M UTC'))
             send_telegram_message(summary_message)
-            print("\nFinal summary message sent to Telegram (or printed if not configured).")
+            print("Retrain summary sent to Telegram.")
 
             sleep_seconds = seconds_until_next_4h_utc()
-            print(f"Sleeping for {sleep_seconds:.0f} seconds until next 4-hour UTC boundary.")
+            print(f"Sleeping {sleep_seconds:.0f} seconds until next 4-hour UTC boundary.")
             time.sleep(sleep_seconds)
 
     except KeyboardInterrupt:
-        print("\nExecution interrupted by user. Exiting gracefully.")
+        print("Interrupted by user. Exiting.")
         cleanup()
 
 if __name__ == "__main__":
