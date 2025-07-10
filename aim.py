@@ -52,7 +52,7 @@ CRYPTO_SYMBOLS = [
     "MNT/USDT", "LTC/USDT", "NEAR/USDT"
 ]
 
-# --- Telegram Messaging ---
+# --- Telegram Functions ---
 def send_telegram_message(message, chat_id_override=None):
     if not TELEGRAM_BOT_TOKEN:
         print("TELEGRAM_BOT_TOKEN not set! Cannot send messages.")
@@ -225,43 +225,46 @@ def calculate_bollinger_bands(close, window=20, num_std=2):
     lower_band = sma - (std * num_std)
     return upper_band, lower_band
 
-def calculate_indicators(df):
-    df['close'] = df['close'].astype(float)
-    df['rsi5'] = calculate_rsi(df['close'], 5)
-    df['rsi13'] = calculate_rsi(df['close'], 13)
-    df['rsi21'] = calculate_rsi(df['close'], 21)
-    k, d = calculate_stoch_rsi(df, rsi_len=13, stoch_len=8, smooth_k=5, smooth_d=3)
-    df['stochrsi_k'] = k
-    df['stochrsi_d'] = d
-    wr_dict = calculate_multi_wr(df, lengths=[3, 13, 144, 8, 233, 55])
-    for length, series in wr_dict.items():
-        df[f'wr_{length}'] = series
-    kdj_k, kdj_d, kdj_j = calculate_kdj(df, length=5, ma1=8, ma2=8)
-    df['kdj_k'] = kdj_k
-    df['kdj_d'] = kdj_d
-    df['kdj_j'] = kdj_j
-    macd_line, macd_signal = calculate_macd(df['close'])
-    df['macd_line'] = macd_line
-    df['macd_signal'] = macd_signal
-    upper_band, lower_band = calculate_bollinger_bands(df['close'])
-    df['bb_upper'] = upper_band
-    df['bb_lower'] = lower_band
-    return df
+# --- Indicator signal functions ---
+def indicator_signal_stoch_rsi(df, idx):
+    return analyze_stoch_rsi_trend(df['stochrsi_k'], df['stochrsi_d'], idx)
 
-# --- ML and Backtest Globals ---
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score
-import xgboost as xgb
+def indicator_signal_wr(df, idx):
+    wr_dict = {length: df[f'wr_{length}'] for length in [3, 13, 144, 8, 233, 55]}
+    return analyze_wr_relative_positions(wr_dict, idx)
 
-ml_training_X = deque(maxlen=1000)
-ml_training_y = deque(maxlen=1000)
-ml_model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
-ml_model_trained = False
-ml_model_lock = threading.Lock()
+def indicator_signal_rsi(df, idx):
+    return analyze_rsi_trend(df['rsi5'], df['rsi13'], df['rsi21'], idx)
 
-ml_retrain_count = 0
-ml_retrain_performance = deque(maxlen=10)
+def indicator_signal_kdj(df, idx):
+    return analyze_kdj_trend(df['kdj_k'], df['kdj_d'], df['kdj_j'], idx)
 
+def indicator_signal_macd(df, idx):
+    macd_line = df['macd_line']
+    macd_signal = df['macd_signal']
+    if idx < 1 or len(macd_line) <= idx or pd.isna(macd_line.iloc[idx]) or pd.isna(macd_signal.iloc[idx]):
+        return None
+    if macd_line.iloc[idx-1] < macd_signal.iloc[idx-1] and macd_line.iloc[idx] > macd_signal.iloc[idx]:
+        return "up"
+    elif macd_line.iloc[idx-1] > macd_signal.iloc[idx-1] and macd_line.iloc[idx] < macd_signal.iloc[idx]:
+        return "down"
+    else:
+        return None
+
+def indicator_signal_bollinger(df, idx):
+    price = df['close'].iloc[idx]
+    upper_band = df['bb_upper']
+    lower_band = df['bb_lower']
+    if np.isnan(upper_band.iloc[idx]) or np.isnan(lower_band.iloc[idx]) or np.isnan(price):
+        return None
+    if price < lower_band.iloc[idx]:
+        return "up"
+    elif price > upper_band.iloc[idx]:
+        return "down"
+    else:
+        return None
+
+# --- Indicator functions mapping ---
 INDICATOR_FUNCTIONS = {
     'Stoch RSI': indicator_signal_stoch_rsi,
     'Williams %R': indicator_signal_wr,
@@ -271,6 +274,17 @@ INDICATOR_FUNCTIONS = {
     'Bollinger': indicator_signal_bollinger,
 }
 
+# --- ML and Backtest Globals ---
+ml_training_X = deque(maxlen=1000)
+ml_training_y = deque(maxlen=1000)
+ml_model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+ml_model_trained = False
+ml_model_lock = threading.Lock()
+
+ml_retrain_count = 0
+ml_retrain_performance = deque(maxlen=10)
+
+# --- ML Helper Functions ---
 def indicator_signals_to_features(indicator_signals):
     features = []
     for name in INDICATOR_FUNCTIONS.keys():
