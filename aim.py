@@ -8,12 +8,10 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
+from sklearn.linear_model import LogisticRegression
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
-import xgboost as xgb
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score
 
 # --- Global Configurations ---
 webserver_path = os.path.join(os.path.dirname(__file__), 'webserver.py')
@@ -59,6 +57,7 @@ def send_telegram_message(message, chat_id_override=None):
         return
 
     MAX_MESSAGE_LENGTH = 4096
+
     target_chat_ids = []
     if chat_id_override:
         target_chat_ids = [chat_id_override]
@@ -225,19 +224,48 @@ def calculate_bollinger_bands(close, window=20, num_std=2):
     lower_band = sma - (std * num_std)
     return upper_band, lower_band
 
-# --- Indicator signal functions ---
-def indicator_signal_stoch_rsi(df, idx):
-    return analyze_stoch_rsi_trend(df['stochrsi_k'], df['stochrsi_d'], idx)
+def calculate_indicators(df):
+    df['close'] = df['close'].astype(float)
+    df['rsi5'] = calculate_rsi(df['close'], 5)
+    df['rsi13'] = calculate_rsi(df['close'], 13)
+    df['rsi21'] = calculate_rsi(df['close'], 21)
+    k, d = calculate_stoch_rsi(df, rsi_len=13, stoch_len=8, smooth_k=5, smooth_d=3)
+    df['stochrsi_k'] = k
+    df['stochrsi_d'] = d
+    wr_dict = calculate_multi_wr(df, lengths=[3, 13, 144, 8, 233, 55])
+    for length, series in wr_dict.items():
+        df[f'wr_{length}'] = series
+    kdj_k, kdj_d, kdj_j = calculate_kdj(df, length=5, ma1=8, ma2=8)
+    df['kdj_k'] = kdj_k
+    df['kdj_d'] = kdj_d
+    df['kdj_j'] = kdj_j
+    macd_line, macd_signal = calculate_macd(df['close'])
+    df['macd_line'] = macd_line
+    df['macd_signal'] = macd_signal
+    upper_band, lower_band = calculate_bollinger_bands(df['close'])
+    df['bb_upper'] = upper_band
+    df['bb_lower'] = lower_band
+    return df
 
-def indicator_signal_wr(df, idx):
-    wr_dict = {length: df[f'wr_{length}'] for length in [3, 13, 144, 8, 233, 55]}
-    return analyze_wr_relative_positions(wr_dict, idx)
+# --- ML and Backtest Globals ---
+ml_training_X = deque(maxlen=1000)
+ml_training_y = deque(maxlen=1000)
+ml_model = LogisticRegression(solver='liblinear', random_state=42)
+ml_model_trained = False
+ml_model_lock = threading.Lock()
 
-def indicator_signal_rsi(df, idx):
-    return analyze_rsi_trend(df['rsi5'], df['rsi13'], df['rsi21'], idx)
+ml_retrain_count = 0  # Count how many times retrained
+ml_retrain_performance = deque(maxlen=10)  # Store last 10 retrain accuracies (0-1 scale)
 
-def indicator_signal_kdj(df, idx):
-    return analyze_kdj_trend(df['kdj_k'], df['kdj_d'], df['kdj_j'], idx)
+# --- Indicator functions mapping ---
+INDICATOR_FUNCTIONS = {
+    'Stoch RSI': lambda df, idx: analyze_stoch_rsi_trend(df['stochrsi_k'], df['stochrsi_d'], idx),
+    'Williams %R': lambda df, idx: analyze_wr_relative_positions({length: df[f'wr_{length}'] for length in [3,13,144,8,233,55]}, idx),
+    'RSI': lambda df, idx: analyze_rsi_trend(df['rsi5'], df['rsi13'], df['rsi21'], idx),
+    'KDJ': lambda df, idx: analyze_kdj_trend(df['kdj_k'], df['kdj_d'], df['kdj_j'], idx),
+    'MACD': lambda df, idx: indicator_signal_macd(df, idx),
+    'Bollinger': lambda df, idx: indicator_signal_bollinger(df, idx),
+}
 
 def indicator_signal_macd(df, idx):
     macd_line = df['macd_line']
@@ -264,27 +292,7 @@ def indicator_signal_bollinger(df, idx):
     else:
         return None
 
-# --- Indicator functions mapping ---
-INDICATOR_FUNCTIONS = {
-    'Stoch RSI': indicator_signal_stoch_rsi,
-    'Williams %R': indicator_signal_wr,
-    'RSI': indicator_signal_rsi,
-    'KDJ': indicator_signal_kdj,
-    'MACD': indicator_signal_macd,
-    'Bollinger': indicator_signal_bollinger,
-}
-
-# --- ML and Backtest Globals ---
-ml_training_X = deque(maxlen=1000)
-ml_training_y = deque(maxlen=1000)
-ml_model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
-ml_model_trained = False
-ml_model_lock = threading.Lock()
-
-ml_retrain_count = 0
-ml_retrain_performance = deque(maxlen=10)
-
-# --- ML Helper Functions ---
+# --- ML Functions ---
 def indicator_signals_to_features(indicator_signals):
     features = []
     for name in INDICATOR_FUNCTIONS.keys():
@@ -295,62 +303,44 @@ def indicator_signals_to_features(indicator_signals):
             features.append(-1)
         else:
             features.append(0)
-    return np.array(features)
-
-def cross_validate_and_train(X, y):
-    global ml_model_trained, ml_retrain_count, ml_retrain_performance
-    tscv = TimeSeriesSplit(n_splits=5)
-    accuracies = []
-    for train_index, val_index in tscv.split(X):
-        X_train, X_val = X[train_index], X[val_index]
-        y_train, y_val = y[train_index], y[val_index]
-        model = xgb.XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
-        model.fit(X_train, y_train)
-        preds = model.predict(X_val)
-        acc = accuracy_score(y_val, preds)
-        accuracies.append(acc)
-    avg_acc = np.mean(accuracies)
-    ml_model.fit(X, y)
-    ml_model_trained = True
-    ml_retrain_count += 1
-    ml_retrain_performance.append(avg_acc)
-    print(f"ML model retrained #{ml_retrain_count} with CV accuracy: {avg_acc:.2%}")
+    return np.array(features).reshape(1, -1)
 
 def update_ml_model():
+    global ml_model_trained, ml_retrain_count
     with ml_model_lock:
         if len(ml_training_X) > len(INDICATOR_FUNCTIONS) * 5:
             try:
                 X = np.array(list(ml_training_X))
                 y = np.array(list(ml_training_y))
-                cross_validate_and_train(X, y)
-            except Exception as e:
-                print(f"Error training ML model: {e}")
+                ml_model.fit(X, y)
+                ml_model_trained = True
+                ml_retrain_count += 1
+                accuracy = ml_model.score(X, y)
+                ml_retrain_performance.append(accuracy)
+                print(f"ML model retrained {ml_retrain_count} times. Latest accuracy: {accuracy:.2%}")
+            except ValueError:
+                ml_model_trained = False
         else:
-            print("Not enough data to train ML model.")
-            global ml_model_trained
             ml_model_trained = False
 
 def add_ml_training_sample(indicator_signals, price_move):
     features = []
     for name in INDICATOR_FUNCTIONS.keys():
         val = indicator_signals.get(name)
-        if val == "up":
-            features.append(1)
-        elif val == "down":
-            features.append(-1)
-        else:
-            features.append(0)
+        if val == "up": features.append(1)
+        elif val == "down": features.append(-1)
+        else: features.append(0)
     ml_training_X.append(features)
     ml_training_y.append(1 if price_move > 0 else 0)
 
+# --- Backtest and Performance Update ---
 def update_performance_and_ml_from_backtest(df):
     start_idx = max(50, 0)
     if len(df) < start_idx + 2:
         return
     for idx in range(start_idx, len(df) - 1):
         regime = get_market_regime(df.iloc[:idx+1])
-        if regime == "unknown":
-            continue
+        if regime == "unknown": continue
         current_indicator_signals = {name: func(df, idx) for name, func in INDICATOR_FUNCTIONS.items()}
         price_now = df['close'].iloc[idx]
         price_next = df['close'].iloc[idx+1]
@@ -410,15 +400,19 @@ def fetch_latest_ohlcv(symbol, timeframe='4h', limit=750):
 # --- Retrain Summary Message ---
 def format_retrain_summary_message(timestamp_str):
     if ml_retrain_count == 0:
-        return "<i>No ML retraining has occurred yet.</i>"
-    avg_acc = np.mean(ml_retrain_performance) if ml_retrain_performance else 0.0
-    return (
-        f"<b>🤖 ML Retrain Summary @ {timestamp_str} (4h TF)</b>\n\n"
-        f"• Total Retrains: <b>{ml_retrain_count}</b>\n"
-        f"• Average CV Accuracy: <b>{avg_acc*100:.2f}%</b>\n\n"
-        f"<i>Model adapts as new data arrives. Monitor retrain frequency and accuracy.</i>"
-    )
+        retrain_msg = "<i>No ML retraining has occurred yet.</i>"
+    else:
+        avg_perf = np.mean(ml_retrain_performance) if ml_retrain_performance else 0.0
+        improvement_pct = avg_perf * 100
+        retrain_msg = (
+            f"<b>🤖 ML Retrain Summary @ {timestamp_str} (4h TF)</b>\n\n"
+            f"• Total Retrains: <b>{ml_retrain_count}</b>\n"
+            f"• Average Training Accuracy: <b>{improvement_pct:.2f}%</b>\n\n"
+            f"<i>Model adapts as new data arrives. Monitor retrain frequency and accuracy.</i>"
+        )
+    return retrain_msg
 
+# --- Time until next 4h UTC ---
 def seconds_until_next_4h_utc():
     now = datetime.utcnow()
     next_hour = (now.hour // 4 + 1) * 4
@@ -435,7 +429,7 @@ def main():
     try:
         while True:
             start_time = datetime.utcnow()
-            print(f"\nStarting backtest and retrain summary at {start_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            print(f"\nStarting backtest & retrain summary at {start_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
             MAX_WORKERS = min(16, os.cpu_count() * 2 + 1)
             print(f"Using {MAX_WORKERS} threads for parallel processing.")
