@@ -9,384 +9,294 @@ import numpy as np
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from sklearn.linear_model import LogisticRegression
+from sklearn.calibration import CalibratedClassifierCV
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
 
-# --- Global Configurations ---
+# --- Launch Webserver Subprocess ---
 webserver_path = os.path.join(os.path.dirname(__file__), 'webserver.py')
 webserver_process = subprocess.Popen([sys.executable, webserver_path])
-
 def cleanup():
     print("Terminating webserver subprocess...")
     webserver_process.terminate()
-
 atexit.register(cleanup)
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
+# --- Telegram Configuration ---
+TELEGRAM_BOT_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID     = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_CHANNEL_ID  = os.environ.get("TELEGRAM_CHANNEL_ID")
 
+def send_telegram_message(message, chat_id_override=None):
+    if not TELEGRAM_BOT_TOKEN:
+        print("TELEGRAM_BOT_TOKEN not set! Cannot send messages.")
+        return
+    MAX_LEN = 4096
+    target_ids = [chat_id_override] if chat_id_override else list(filter(None, [TELEGRAM_CHAT_ID, TELEGRAM_CHANNEL_ID]))
+    parts = []
+    if len(message) > MAX_LEN:
+        curr = ""
+        for line in message.split('\n'):
+            if len(curr) + len(line) + 1 <= MAX_LEN:
+                curr += line + '\n'
+            else:
+                parts.append(curr)
+                curr = line + '\n'
+        if curr: parts.append(curr)
+    else:
+        parts = [message]
+    for part in parts:
+        for chat_id in target_ids:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                data={'chat_id': chat_id, 'text': part, 'parse_mode': 'HTML', 'disable_web_page_preview': True},
+                timeout=15
+            )
+            if not resp.ok:
+                print(f"Failed to send message to {chat_id}: {resp.text}")
+
+# --- CCXT Exchange Initialization ---
 exchange = None
 exchange_lock = threading.Lock()
-
 def initialize_exchange():
     global exchange
     if exchange is None:
         try:
             exchange = ccxt.kucoin()
             exchange.load_markets()
-            print("CCXT exchange initialized and markets loaded.")
+            print("CCXT exchange initialized.")
         except Exception as e:
-            print(f"Error initializing CCXT exchange: {e}")
+            print(f"Error initializing CCXT: {e}")
             sys.exit(1)
-
 initialize_exchange()
 
 CRYPTO_SYMBOLS = [
     "XRP/USDT", "XMR/USDT", "GMX/USDT", "LUNA/USDT", "TRX/USDT", "EIGEN/USDT",
     "APE/USDT", "WAVES/USDT", "PLUME/USDT", "SUSHI/USDT", "DOGE/USDT", "VIRTUAL/USDT",
     "CAKE/USDT", "GRASS/USDT", "AAVE/USDT", "SUI/USDT", "ARB/USDT", "XLM/USDT",
-    "MNT/USDT", "LTC/USDT", "NEAR/USDT"
+    "MNT/USDT", "LTC/USDT", "NEAR/USDT",
+    "SKL/USDT", "METIS/USDT", "ONG/USDT", "BOBA/USDT", "CELR/USDT", "MYRIA/USDT",
+    "CHR/USDT", "B2/USDT", "PHB/USDT", "ZETA/USDT", "IDEX/USDT", "MAGIC/USDT",
+    "DYDX/USDT"
 ]
 
-# --- Telegram Functions ---
-def send_telegram_message(message, chat_id_override=None):
-    if not TELEGRAM_BOT_TOKEN:
-        print("TELEGRAM_BOT_TOKEN not set! Cannot send messages.")
-        return
-
-    MAX_MESSAGE_LENGTH = 4096
-
-    target_chat_ids = []
-    if chat_id_override:
-        target_chat_ids = [chat_id_override]
-    else:
-        if TELEGRAM_CHAT_ID:
-            target_chat_ids.append(TELEGRAM_CHAT_ID)
-        if TELEGRAM_CHANNEL_ID:
-            target_chat_ids.append(TELEGRAM_CHANNEL_ID)
-
-    if not target_chat_ids:
-        print("No TELEGRAM_CHAT_ID or TELEGRAM_CHANNEL_ID set, message not sent!")
-        return
-
-    messages_to_send = []
-    if len(message) > MAX_MESSAGE_LENGTH:
-        parts = []
-        current_part = ""
-        for line in message.split('\n'):
-            if len(current_part) + len(line) + 1 <= MAX_MESSAGE_LENGTH:
-                current_part += line + '\n'
-            else:
-                parts.append(current_part)
-                current_part = line + '\n'
-        if current_part:
-            parts.append(current_part)
-        messages_to_send = parts
-        print(f"Message too long ({len(message)} chars), split into {len(messages_to_send)} parts.")
-    else:
-        messages_to_send = [message]
-
-    sent_any = False
-    for msg_part in messages_to_send:
-        for chat_id in target_chat_ids:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {
-                'chat_id': chat_id,
-                'text': msg_part,
-                'parse_mode': 'HTML',
-                'disable_web_page_preview': True
-            }
-            try:
-                response = requests.post(url, data=payload, timeout=15)
-                if not response.ok:
-                    print(f"Failed to send message part to {chat_id}: {response.text}")
-                else:
-                    sent_any = True
-            except Exception as e:
-                print(f"Error sending Telegram message part to {chat_id}: {e}")
-    if not sent_any and not messages_to_send:
-        print("No messages were generated or sent.")
-
-# --- Indicator Calculations ---
+# --- Indicator Utilities ---
 def calculate_rsi(series, period=13):
     delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    gain  = delta.clip(lower=0)
+    loss  = -delta.clip(upper=0)
     avg_gain = gain.ewm(com=period-1, adjust=False).mean()
     avg_loss = loss.ewm(com=period-1, adjust=False).mean()
     rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return 100 - (100 / (1 + rs))
 
 def calculate_stoch_rsi(df, rsi_len=13, stoch_len=8, smooth_k=5, smooth_d=3):
     rsi = calculate_rsi(df['close'], rsi_len)
     min_rsi = rsi.rolling(window=stoch_len).min()
     max_rsi = rsi.rolling(window=stoch_len).max()
-    denom = max_rsi - min_rsi
-    denom = denom.replace(0, np.nan)
-    stoch_rsi = (rsi - min_rsi) / denom * 100
-    stoch_rsi = stoch_rsi.fillna(method='ffill')
-    k = stoch_rsi.rolling(window=smooth_k).mean()
+    pct = (rsi - min_rsi) / (max_rsi - min_rsi) * 100
+    pct = pct.fillna(method='ffill')
+    k = pct.rolling(window=smooth_k).mean()
     d = k.rolling(window=smooth_d).mean()
     return k, d
 
-def calculate_multi_wr(df, lengths=[3, 13, 144, 8, 233, 55]):
-    wr_dict = {}
-    for length in lengths:
-        highest_high = df['high'].rolling(window=length).max()
-        lowest_low = df['low'].rolling(window=length).min()
-        denom = highest_high - lowest_low
-        denom = denom.replace(0, np.nan)
-        wr = (highest_high - df['close']) / denom * -100
-        wr_dict[length] = wr.fillna(method='ffill')
-    return wr_dict
-
-def analyze_wr_relative_positions(wr_dict, idx=-1):
-    try:
-        wr_8 = wr_dict[8].iloc[idx]
-        wr_3 = wr_dict[3].iloc[idx]
-        wr_144 = wr_dict[144].iloc[idx]
-        wr_233 = wr_dict[233].iloc[idx]
-        wr_55 = wr_dict[55].iloc[idx]
-        if any(pd.isna([wr_8, wr_3, wr_144, wr_233, wr_55])):
-            return None
-    except (KeyError, IndexError, AttributeError):
-        return None
-
-    if wr_8 > wr_233 and wr_3 > wr_233 and wr_8 > wr_144 and wr_3 > wr_144:
-        return "up"
-    elif wr_8 < wr_55 and wr_3 < wr_55:
-        return "down"
-    else:
-        return None
+def calculate_multi_wr(df, lengths=[3,13,144,8,233,55]):
+    wr = {}
+    for L in lengths:
+        hh = df['high'].rolling(L).max()
+        ll = df['low'].rolling(L).min()
+        wr[L] = ((hh - df['close']) / (hh - ll) * -100).fillna(method='ffill')
+    return wr
 
 def calculate_kdj(df, length=5, ma1=8, ma2=8):
-    low_min = df['low'].rolling(window=length, min_periods=1).min()
-    high_max = df['high'].rolling(window=length, min_periods=1).max()
-    denom = (high_max - low_min)
-    denom = denom.replace(0, np.nan)
-    rsv = (df['close'] - low_min) / denom * 100
-    rsv = rsv.fillna(method='ffill')
-    k = rsv.ewm(span=ma1, adjust=False).mean()
-    d = k.ewm(span=ma2, adjust=False).mean()
-    j = 3 * k - 2 * d
+    low_min  = df['low'].rolling(length, min_periods=1).min()
+    high_max = df['high'].rolling(length, min_periods=1).max()
+    rsv = ((df['close'] - low_min) / (high_max - low_min) * 100).fillna(method='ffill')
+    k  = rsv.ewm(span=ma1, adjust=False).mean()
+    d  = k.ewm(span=ma2, adjust=False).mean()
+    j  = 3*k - 2*d
     return k, d, j
 
-def analyze_stoch_rsi_trend(k, d, idx=-1):
-    if pd.isna(k.iloc[idx]) or pd.isna(d.iloc[idx]):
-        return None
-    if k.iloc[idx] > d.iloc[idx]:
-        return "up"
-    elif k.iloc[idx] < d.iloc[idx]:
-        return "down"
-    else:
-        return None
-
-def analyze_rsi_trend(rsi5, rsi13, rsi21, idx=-1):
-    try:
-        if pd.isna(rsi5.iloc[idx]) or pd.isna(rsi13.iloc[idx]) or pd.isna(rsi21.iloc[idx]):
-            return None
-        if rsi5.iloc[idx] > rsi13.iloc[idx] > rsi21.iloc[idx]:
-            return "up"
-        elif rsi5.iloc[idx] < rsi13.iloc[idx] < rsi21.iloc[idx]:
-            return "down"
-        else:
-            return None
-    except IndexError:
-        return None
-
-def analyze_kdj_trend(k, d, j, idx=-1):
-    try:
-        if pd.isna(k.iloc[idx]) or pd.isna(d.iloc[idx]) or pd.isna(j.iloc[idx]):
-            return None
-        if j.iloc[idx] > k.iloc[idx] and j.iloc[idx] > d.iloc[idx]:
-            return "up"
-        elif j.iloc[idx] < k.iloc[idx] and j.iloc[idx] < d.iloc[idx]:
-            return "down"
-        else:
-            return None
-    except IndexError:
-        return None
-
 def calculate_macd(close, fast=12, slow=26, signal=9):
-    ema_fast = close.ewm(span=fast, adjust=False).mean()
-    ema_slow = close.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    return macd_line, signal_line
+    ema_f = close.ewm(span=fast, adjust=False).mean()
+    ema_s = close.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_f - ema_s
+    sig_line  = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line, sig_line
 
 def calculate_bollinger_bands(close, window=20, num_std=2):
-    sma = close.rolling(window=window).mean()
-    std = close.rolling(window=window).std()
-    upper_band = sma + (std * num_std)
-    lower_band = sma - (std * num_std)
-    return upper_band, lower_band
+    sma = close.rolling(window).mean()
+    std = close.rolling(window).std()
+    return sma + num_std*std, sma - num_std*std
 
 def calculate_indicators(df):
     df['close'] = df['close'].astype(float)
-    df['rsi5'] = calculate_rsi(df['close'], 5)
+    df['rsi5']  = calculate_rsi(df['close'], 5)
     df['rsi13'] = calculate_rsi(df['close'], 13)
     df['rsi21'] = calculate_rsi(df['close'], 21)
-    k, d = calculate_stoch_rsi(df, rsi_len=13, stoch_len=8, smooth_k=5, smooth_d=3)
-    df['stochrsi_k'] = k
-    df['stochrsi_d'] = d
-    wr_dict = calculate_multi_wr(df, lengths=[3, 13, 144, 8, 233, 55])
-    for length, series in wr_dict.items():
-        df[f'wr_{length}'] = series
-    kdj_k, kdj_d, kdj_j = calculate_kdj(df, length=5, ma1=8, ma2=8)
-    df['kdj_k'] = kdj_k
-    df['kdj_d'] = kdj_d
-    df['kdj_j'] = kdj_j
+    k, d = calculate_stoch_rsi(df)
+    df['stochrsi_k'], df['stochrsi_d'] = k, d
+    wr = calculate_multi_wr(df)
+    for L, series in wr.items(): df[f'wr_{L}'] = series
+    kdj_k, kdj_d, kdj_j = calculate_kdj(df)
+    df['kdj_k'], df['kdj_d'], df['kdj_j'] = kdj_k, kdj_d, kdj_j
     macd_line, macd_signal = calculate_macd(df['close'])
-    df['macd_line'] = macd_line
-    df['macd_signal'] = macd_signal
-    upper_band, lower_band = calculate_bollinger_bands(df['close'])
-    df['bb_upper'] = upper_band
-    df['bb_lower'] = lower_band
+    df['macd_line'], df['macd_signal'] = macd_line, macd_signal
+    ub, lb = calculate_bollinger_bands(df['close'])
+    df['bb_upper'], df['bb_lower'] = ub, lb
     return df
 
-# --- ML and Backtest Globals ---
-ml_training_X = deque(maxlen=1000)
-ml_training_y = deque(maxlen=1000)
-ml_model = LogisticRegression(solver='liblinear', random_state=42)
-ml_model_trained = False
-ml_model_lock = threading.Lock()
+# --- Indicator Signal Analysis ---
+def analyze_trend(series1, series2, idx):
+    if idx < 1 or pd.isna(series1.iloc[idx]) or pd.isna(series2.iloc[idx]): return None
+    if series1.iloc[idx] > series2.iloc[idx]: return "up"
+    if series1.iloc[idx] < series2.iloc[idx]: return "down"
+    return None
 
-ml_retrain_count = 0  # Count how many times retrained
-ml_retrain_performance = deque(maxlen=10)  # Store last 10 retrain accuracies (0-1 scale)
+def analyze_wr_positions(wr_dict, idx):
+    try:
+        w8, w3, w144, w233, w55 = (wr_dict[x].iloc[idx] for x in (8,3,144,233,55))
+    except: return None
+    if w8 > w233 and w3 > w233 and w8 > w144 and w3 > w144: return "up"
+    if w8 < w55 and w3 < w55: return "down"
+    return None
 
-# --- Indicator functions mapping ---
 INDICATOR_FUNCTIONS = {
-    'Stoch RSI': lambda df, idx: analyze_stoch_rsi_trend(df['stochrsi_k'], df['stochrsi_d'], idx),
-    'Williams %R': lambda df, idx: analyze_wr_relative_positions({length: df[f'wr_{length}'] for length in [3,13,144,8,233,55]}, idx),
-    'RSI': lambda df, idx: analyze_rsi_trend(df['rsi5'], df['rsi13'], df['rsi21'], idx),
-    'KDJ': lambda df, idx: analyze_kdj_trend(df['kdj_k'], df['kdj_d'], df['kdj_j'], idx),
-    'MACD': lambda df, idx: indicator_signal_macd(df, idx),
-    'Bollinger': lambda df, idx: indicator_signal_bollinger(df, idx),
+    'Stoch RSI': lambda df, idx: analyze_trend(df['stochrsi_k'], df['stochrsi_d'], idx),
+    'Williams %R': lambda df, idx: analyze_wr_positions({L:df[f'wr_{L}'] for L in [3,13,144,8,233,55]}, idx),
+    'RSI': lambda df, idx: ("up" if df['rsi5'].iloc[idx] > df['rsi13'].iloc[idx] > df['rsi21'].iloc[idx]
+                            else "down" if df['rsi5'].iloc[idx] < df['rsi13'].iloc[idx] < df['rsi21'].iloc[idx]
+                            else None),
+    'KDJ': lambda df, idx: analyze_trend(df['kdj_j'], df['kdj_d'], idx),
+    'MACD': lambda df, idx: analyze_trend(df['macd_line'], df['macd_signal'], idx),
+    'Bollinger': lambda df, idx: ("up" if df['close'].iloc[idx] < df['bb_lower'].iloc[idx]
+                                  else "down" if df['close'].iloc[idx] > df['bb_upper'].iloc[idx]
+                                  else None),
 }
 
-def indicator_signal_macd(df, idx):
-    macd_line = df['macd_line']
-    macd_signal = df['macd_signal']
-    if idx < 1 or len(macd_line) <= idx or pd.isna(macd_line.iloc[idx]) or pd.isna(macd_signal.iloc[idx]):
-        return None
-    if macd_line.iloc[idx-1] < macd_signal.iloc[idx-1] and macd_line.iloc[idx] > macd_signal.iloc[idx]:
-        return "up"
-    elif macd_line.iloc[idx-1] > macd_signal.iloc[idx-1] and macd_line.iloc[idx] < macd_signal.iloc[idx]:
-        return "down"
-    else:
-        return None
-
-def indicator_signal_bollinger(df, idx):
-    price = df['close'].iloc[idx]
-    upper_band = df['bb_upper']
-    lower_band = df['bb_lower']
-    if np.isnan(upper_band.iloc[idx]) or np.isnan(lower_band.iloc[idx]) or np.isnan(price):
-        return None
-    if price < lower_band.iloc[idx]:
-        return "up"
-    elif price > upper_band.iloc[idx]:
-        return "down"
-    else:
-        return None
-
-# --- ML Functions ---
-def indicator_signals_to_features(indicator_signals):
-    features = []
-    for name in INDICATOR_FUNCTIONS.keys():
-        val = indicator_signals.get(name)
-        if val == "up":
-            features.append(1)
-        elif val == "down":
-            features.append(-1)
-        else:
-            features.append(0)
-    return np.array(features).reshape(1, -1)
-
-def update_ml_model():
-    global ml_model_trained, ml_retrain_count
-    with ml_model_lock:
-        if len(ml_training_X) > len(INDICATOR_FUNCTIONS) * 5:
-            try:
-                X = np.array(list(ml_training_X))
-                y = np.array(list(ml_training_y))
-                ml_model.fit(X, y)
-                ml_model_trained = True
-                ml_retrain_count += 1
-                accuracy = ml_model.score(X, y)
-                ml_retrain_performance.append(accuracy)
-                print(f"ML model retrained {ml_retrain_count} times. Latest accuracy: {accuracy:.2%}")
-            except ValueError:
-                ml_model_trained = False
-        else:
-            ml_model_trained = False
-
-def add_ml_training_sample(indicator_signals, price_move):
-    features = []
-    for name in INDICATOR_FUNCTIONS.keys():
-        val = indicator_signals.get(name)
-        if val == "up": features.append(1)
-        elif val == "down": features.append(-1)
-        else: features.append(0)
-    ml_training_X.append(features)
-    ml_training_y.append(1 if price_move > 0 else 0)
-
-# --- Backtest and Performance Update ---
-def update_performance_and_ml_from_backtest(df):
-    start_idx = max(50, 0)
-    if len(df) < start_idx + 2:
-        return
-    for idx in range(start_idx, len(df) - 1):
-        regime = get_market_regime(df.iloc[:idx+1])
-        if regime == "unknown": continue
-        current_indicator_signals = {name: func(df, idx) for name, func in INDICATOR_FUNCTIONS.items()}
-        price_now = df['close'].iloc[idx]
-        price_next = df['close'].iloc[idx+1]
-        price_move = price_next - price_now
-        for name, signal in current_indicator_signals.items():
-            if signal == "up":
-                was_correct = price_next > price_now
-                update_indicator_performance_regime(name, regime, was_correct)
-            elif signal == "down":
-                was_correct = price_next < price_now
-                update_indicator_performance_regime(name, regime, was_correct)
-        add_ml_training_sample(current_indicator_signals, price_move)
-    update_ml_model()
-
-# --- Market Regime and Indicator Performance ---
-def get_market_regime(df, window=50, threshold=0.02):
-    if len(df) < window:
-        return "unknown"
-    returns = df['close'].pct_change()
-    vol = returns.rolling(window=window).std()
-    current_vol = vol.iloc[-1]
-    return "high_vol" if current_vol > threshold else "low_vol"
-
+# --- Machine Learning Components with Calibration ---
 indicator_performance_regime = defaultdict(lambda: {'high_vol': deque(maxlen=200), 'low_vol': deque(maxlen=200)})
+ml_X = deque(maxlen=1000)
+ml_y = deque(maxlen=1000)
+base_ml_model = LogisticRegression(solver='liblinear', random_state=42)
+calibrated_ml_model = None
+ml_trained = False
+ml_lock = threading.Lock()
 
-def update_indicator_performance_regime(indicator_name, regime, was_correct):
+def get_market_regime(df, window=50, threshold=0.02):
+    if len(df) < window: return "unknown"
+    vol = df['close'].pct_change().rolling(window).std().iloc[-1]
+    return "high_vol" if vol > threshold else "low_vol"
+
+def update_indicator_performance(name, regime, correct):
     if regime == "unknown": return
-    indicator_performance_regime[indicator_name][regime].append(1 if was_correct else 0)
+    indicator_performance_regime[name][regime].append(1 if correct else 0)
 
-def get_indicator_weight_regime(indicator_name, regime):
+def get_indicator_weight(name, regime):
     if regime == "unknown": return 0.5
-    perf = indicator_performance_regime[indicator_name][regime]
-    return sum(perf) / len(perf) if perf else 0.5
+    perf = indicator_performance_regime[name][regime]
+    return sum(perf)/len(perf) if perf else 0.5
 
-# --- Fetch OHLCV ---
+def add_ml_sample(signals, price_move):
+    feats = [(1 if s=="up" else -1 if s=="down" else 0) for s in signals.values()]
+    ml_X.append(feats)
+    ml_y.append(1 if price_move>0 else 0)
+
+def train_ml_model():
+    global ml_trained, calibrated_ml_model
+    with ml_lock:
+        if len(ml_X) > len(INDICATOR_FUNCTIONS)*5:
+            try:
+                base_ml_model.fit(np.array(ml_X), np.array(ml_y))
+                # Calibrate probabilities using Platt scaling (sigmoid)
+                calibrated_ml_model = CalibratedClassifierCV(base_ml_model, cv='prefit', method='sigmoid')
+                calibrated_ml_model.fit(np.array(ml_X), np.array(ml_y))
+                ml_trained = True
+                print("ML model trained and calibrated.")
+            except Exception as e:
+                print(f"ML training/calibration failed: {e}")
+                ml_trained = False
+                calibrated_ml_model = None
+        else:
+            ml_trained = False
+            calibrated_ml_model = None
+
+def ml_predict(signals):
+    if not ml_trained or calibrated_ml_model is None:
+        return None, 0.0
+    feats = np.array([(1 if s=="up" else -1 if s=="down" else 0) for s in signals.values()]).reshape(1,-1)
+    try:
+        proba = calibrated_ml_model.predict_proba(feats)[0]
+        max_proba = max(proba)
+        # Return None if max probability is too low (less than 55%)
+        if max_proba < 0.55:
+            return None, 0.0
+        if proba[1] > proba[0]:
+            return "buy", proba[1]*100
+        else:
+            return "sell", proba[0]*100
+    except Exception as e:
+        print(f"ML prediction error: {e}")
+        return None, 0.0
+
+def adaptive_signal(df):
+    regime = get_market_regime(df)
+    signals = {n: fn(df, -1) for n, fn in INDICATOR_FUNCTIONS.items()}
+    ml_sig, ml_conf = ml_predict(signals)
+    if ml_sig:
+        return ml_sig, ml_conf, signals, regime
+    up_w = down_w = total = 0
+    for n, s in signals.items():
+        w = get_indicator_weight(n, regime)
+        if s=="up": up_w+=w; total+=w
+        if s=="down": down_w+=w; total+=w
+    if total > 0.1:
+        if up_w > down_w * 1.2:
+            return "buy", (up_w / total) * 100, signals, regime
+        if down_w > up_w * 1.2:
+            return "sell", (down_w / total) * 100, signals, regime
+    # If all indicators agree, use average weight as confidence instead of fixed 75%
+    if all(s == "up" for s in signals.values() if s is not None):
+        avg_conf = np.mean([get_indicator_weight(n, regime) for n in INDICATOR_FUNCTIONS]) * 100
+        return "buy", avg_conf, signals, regime
+    if all(s == "down" for s in signals.values() if s is not None):
+        avg_conf = np.mean([get_indicator_weight(n, regime) for n in INDICATOR_FUNCTIONS]) * 100
+        return "sell", avg_conf, signals, regime
+    return None, 0.0, signals, regime
+
+def backtest_update(df):
+    start = max(50, 0)
+    if len(df) < start + 2:
+        return
+    for i in range(start, len(df) - 1):
+        regime = get_market_regime(df[:i + 1])
+        if regime == "unknown":
+            continue
+        sigs = {n: fn(df, i) for n, fn in INDICATOR_FUNCTIONS.items()}
+        p0, p1 = df['close'].iloc[i], df['close'].iloc[i + 1]
+        for n, s in sigs.items():
+            if s == "up":
+                update_indicator_performance(n, regime, p1 > p0)
+            if s == "down":
+                update_indicator_performance(n, regime, p1 < p0)
+        add_ml_sample(sigs, p1 - p0)
+    train_ml_model()
+
+# --- Trailing Take Profit Logic ---
+def determine_trailing_take_profit(regime, accuracy):
+    base = 3.0 if regime == "high_vol" else 1.0
+    adjusted = base * (1.5 - accuracy)
+    return max(0.5, min(adjusted, 4.0))
+
+# --- Fetch OHLCV Data ---
 def fetch_latest_ohlcv(symbol, timeframe='4h', limit=750):
     try:
         with exchange_lock:
             if symbol not in exchange.symbols:
-                print(f"Symbol {symbol} not available on {exchange.id}.")
+                print(f"{symbol} not on exchange.")
                 return None
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        if not ohlcv:
-            print(f"No OHLCV data returned for {symbol}.")
-            return None
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -394,75 +304,221 @@ def fetch_latest_ohlcv(symbol, timeframe='4h', limit=750):
         df.dropna(subset=['close'], inplace=True)
         return df
     except Exception as e:
-        print(f"Error fetching OHLCV for {symbol}: {e}")
+        print(f"Error fetching {symbol}: {e}")
         return None
 
-# --- Retrain Summary Message ---
-def format_retrain_summary_message(timestamp_str):
-    if ml_retrain_count == 0:
-        retrain_msg = "<i>No ML retraining has occurred yet.</i>"
-    else:
-        avg_perf = np.mean(ml_retrain_performance) if ml_retrain_performance else 0.0
-        improvement_pct = avg_perf * 100
-        retrain_msg = (
-            f"<b>🤖 ML Retrain Summary @ {timestamp_str} (4h TF)</b>\n\n"
-            f"• Total Retrains: <b>{ml_retrain_count}</b>\n"
-            f"• Average Training Accuracy: <b>{improvement_pct:.2f}%</b>\n\n"
-            f"<i>Model adapts as new data arrives. Monitor retrain frequency and accuracy.</i>"
-        )
-    return retrain_msg
+# --- Portfolio Management & Position Sizing ---
 
-# --- Time until next 4h UTC ---
+import sqlite3
+import contextlib
+import time
+
+# Configuration for portfolio and risk management
+PORTFOLIO_VALUE = 10_000.0  # initial portfolio value in USD
+MAX_RISK_PER_TRADE = 0.01   # 1% risk per trade
+MAX_POSITION_PCT = 0.20     # max 20% portfolio in one position
+KELLY_ENABLED = True        # enable Kelly sizing
+KELLY_FRACTION = 0.25       # fraction of Kelly to use (safer)
+
+DB_FILE = "portfolio.db"
+
+@contextlib.contextmanager
+def get_db():
+    con = sqlite3.connect(DB_FILE)
+    con.execute("""CREATE TABLE IF NOT EXISTS trades(
+        id INTEGER PRIMARY KEY, ts INTEGER, symbol TEXT,
+        side TEXT, qty REAL, price REAL, pnl REAL)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS equity(
+        ts INTEGER PRIMARY KEY, value REAL)""")
+    yield con
+    con.commit()
+    con.close()
+
+def record_trade(symbol, side, qty, price, pnl=0.0):
+    with get_db() as db:
+        db.execute("INSERT INTO trades(ts,symbol,side,qty,price,pnl) VALUES(?,?,?,?,?,?)",
+                   (int(time.time()), symbol, side, qty, price, pnl))
+
+def record_equity(value):
+    with get_db() as db:
+        db.execute("INSERT OR REPLACE INTO equity(ts,value) VALUES(?,?)",
+                   (int(time.time()), value))
+
+def load_performance(window=150):
+    with get_db() as db:
+        rows = db.execute("SELECT pnl FROM trades ORDER BY ts DESC LIMIT ?",
+                          (window,)).fetchall()
+    if not rows: return [], []
+    wins  = [r[0] for r in rows if r[0] > 0]
+    losses= [-r[0] for r in rows if r[0] < 0]
+    return wins, losses
+
+def kelly_fraction():
+    wins, losses = load_performance()
+    if len(wins) + len(losses) < 30:
+        return 0.0
+    W = len(wins) / (len(wins) + len(losses))
+    R = (np.mean(wins) / np.mean(losses)) if losses else 0.0
+    k = W - (1 - W) / R if R else 0.0
+    return max(0.0, k)
+
+def dollar_risk(equity):
+    return equity * MAX_RISK_PER_TRADE
+
+def calculate_position_size(equity, price, stop_loss_pct):
+    risk_amount = dollar_risk(equity)
+    if KELLY_ENABLED:
+        k = kelly_fraction()
+        risk_amount *= (1 + k * KELLY_FRACTION)
+    qty = risk_amount / (price * stop_loss_pct) if stop_loss_pct > 0 else 0
+    max_qty = (equity * MAX_POSITION_PCT) / price
+    return min(qty, max_qty)
+
+# --- Global equity tracker ---
+current_equity = PORTFOLIO_VALUE
+
+def execute_trade(symbol, side, qty, price, stop_loss_pct, take_profit_pct):
+    global current_equity
+    notional = qty * price
+    if side == "buy":
+        current_equity -= notional
+    elif side == "sell":
+        current_equity += notional
+    record_trade(symbol, side, qty, price)
+    record_equity(current_equity)
+    print(f"Executed {side} {qty:.4f} {symbol} @ {price:.4f}, equity now {current_equity:.2f}")
+
+# --- Process a Single Symbol with Position Sizing ---
+def process_symbol(symbol):
+    df = fetch_latest_ohlcv(symbol)
+    if df is None or len(df) < 100:
+        return None
+    df = calculate_indicators(df.copy())
+    sub = df.iloc[-750:]
+    if len(sub) > 50:
+        backtest_update(sub)
+    sig, conf, states, regime = adaptive_signal(df)
+    if sig in ("buy", "sell") and conf >= 55.0:
+        price = df['close'].iloc[-1]
+        weights = [get_indicator_weight(n, regime) for n in INDICATOR_FUNCTIONS]
+        avg_perf = sum(weights) / len(weights) if weights else 0.5
+        ttp = determine_trailing_take_profit(regime, avg_perf)
+        stop_loss_pct = (ttp / 100) * 0.5  # stop loss at half trailing TP
+        pos_size = calculate_position_size(current_equity, price, stop_loss_pct)
+        if pos_size < 1e-8:
+            return None
+        # Optionally execute trade here:
+        # execute_trade(symbol, sig, pos_size, price, stop_loss_pct, ttp / 100)
+        return {
+            "symbol": symbol,
+            "signal": sig,
+            "confidence": conf,
+            "indicator_states": states,
+            "regime": regime,
+            "current_price": price,
+            "ttp_percent": ttp,
+            "stop_loss_pct": stop_loss_pct * 100,
+            "position_size": pos_size,
+            "notional_usd": pos_size * price
+        }
+    return None
+
+# --- Message Formatting ---
+def format_single_coin_detail(symbol, signal, confidence, indicator_states,
+                              regime, price_str, ttp_percent=None,
+                              stop_loss_pct=None, position_size=None, notional_usd=None):
+    emo = "🟢 BUY" if signal == "buy" else "🔴 SELL"
+    reg_emo = "📈 High Volatility" if regime == "high_vol" else "📉 Low Volatility" if regime == "low_vol" else "❓ Unknown"
+    commentary = {
+        "buy": ["Momentum building! 🚀", "Breakout ahead! 📈", "Bulls taking charge! 🐂"],
+        "sell": ["Caution downtrend! ⚠️", "Bears in control. 🐻", "Possible pullback 🔻"]
+    }
+    comment = np.random.choice(commentary[signal])
+    details = "\n".join(
+        f"  • {n}: {'✅ Up' if s == 'up' else '❌ Down' if s == 'down' else '⚪ Neutral'}"
+        for n, s in indicator_states.items()
+    )
+    display_confidence = min(confidence, 99.9)
+    ttp_line = f"  <b>Trailing Take Profit:</b> <code>{ttp_percent:.2f}%</code>\n" if ttp_percent else ""
+    sl_line = f"  <b>Stop Loss Distance:</b> <code>{stop_loss_pct:.2f}%</code>\n" if stop_loss_pct else ""
+    pos_line = f"  <b>Position Size:</b> <code>{position_size:.4f} units ≈ ${notional_usd:,.2f}</code>\n" if position_size and notional_usd else ""
+    return (
+        f"<b>{symbol} | {emo} ({display_confidence:.1f}%)</b>\n"
+        f"  <b>Price:</b> <code>{price_str}</code>\n"
+        f"  <b>Market:</b> {reg_emo}\n"
+        f"{ttp_line}{sl_line}{pos_line}"
+        f"  <i>{comment}</i>\n"
+        f"  <u>Indicators:</u>\n{details}\n"
+    )
+
+def format_summary_message(coin_results, timestamp_str):
+    if not coin_results:
+        return (
+            f"<b>📊 Market Scan @ {timestamp_str} (4h TF)</b>\n\n"
+            f"<i>No strong BUY/SELL signals detected.</i>"
+        )
+    sorted_results = sorted(coin_results, key=lambda x: x['confidence'], reverse=True)
+    hour = datetime.utcnow().hour
+    greeting = ("🌅 Good morning" if 5 <= hour < 12 else "🌞 Good afternoon" if 12 <= hour < 18 else "🌙 Good evening")
+    header = (
+        f"{greeting}, trader!\n"
+        f"<b>📊 Crypto Signals Scan @ {timestamp_str} (4h TF)</b>\n"
+        f"<i>Top {min(5, len(sorted_results))} opportunities:</i>\n"
+    )
+    perf = "<b>🧠 System Overview:</b>\n" + "".join(
+        f"  • {n}: High Vol: {get_indicator_weight(n, 'high_vol'):.1%}, Low Vol: {get_indicator_weight(n, 'low_vol'):.1%}\n"
+        for n in INDICATOR_FUNCTIONS
+    ) + f"  • ML Model: {'✅ Ready' if ml_trained else '⏳ Training...'}\n\n"
+    details = "<b>⭐ Top Signals:</b>\n" + "".join(
+        format_single_coin_detail(
+            res['symbol'], res['signal'], res['confidence'],
+            res['indicator_states'], res['regime'],
+            f"{res['current_price']:.4f}" if res['current_price'] < 10 else f"{res['current_price']:.2f}",
+            ttp_percent=res.get('ttp_percent'),
+            stop_loss_pct=res.get('stop_loss_pct'),
+            position_size=res.get('position_size'),
+            notional_usd=res.get('notional_usd')
+        ) for res in sorted_results[:5]
+    )
+    closing = np.random.choice([
+        "<i>Trade smart, manage risk!</i>",
+        "<i>Markets are dynamic. Stay sharp!</i>",
+        "<i>Not financial advice.</i>"
+    ])
+    return header + perf + details + closing
+
+# --- Scheduling Utilities ---
 def seconds_until_next_4h_utc():
     now = datetime.utcnow()
-    next_hour = (now.hour // 4 + 1) * 4
-    if next_hour >= 24:
-        next_day = now.date() + timedelta(days=1)
-        next_run = datetime.combine(next_day, datetime.min.time()) + timedelta(hours=0)
-    else:
-        next_run = datetime.combine(now.date(), datetime.min.time()) + timedelta(hours=next_hour)
-    delta = next_run - now
-    return max(delta.total_seconds(), 0)
+    next_hour = ((now.hour // 4) + 1) * 4 % 24
+    next_run = datetime.combine(now.date(), datetime.min.time()) + timedelta(hours=next_hour)
+    if next_run <= now:
+        next_run += timedelta(days=1)
+    return (next_run - now).total_seconds()
 
-# --- Main loop ---
+# --- Main Loop ---
 def main():
     try:
         while True:
-            start_time = datetime.utcnow()
-            print(f"\nStarting backtest & retrain summary at {start_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-
-            MAX_WORKERS = min(16, os.cpu_count() * 2 + 1)
-            print(f"Using {MAX_WORKERS} threads for parallel processing.")
-
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                future_to_symbol = {executor.submit(fetch_latest_ohlcv, symbol, '4h', 750): symbol for symbol in CRYPTO_SYMBOLS}
-                for future in as_completed(future_to_symbol):
-                    symbol = future_to_symbol[future]
-                    try:
-                        df = future.result()
-                        if df is not None and len(df) >= 100:
-                            df = calculate_indicators(df.copy())
-                            backtest_data_start_idx = max(0, len(df) - 750)
-                            backtest_df_subset = df.iloc[backtest_data_start_idx:]
-                            if len(backtest_df_subset) > 50:
-                                update_performance_and_ml_from_backtest(backtest_df_subset)
-                            else:
-                                print(f"Skipping backtest for {symbol}, insufficient data.")
-                        else:
-                            print(f"Insufficient data for {symbol}, skipping backtest.")
-                    except Exception as exc:
-                        print(f"{symbol} backtest exception: {exc}")
-
-            summary_message = format_retrain_summary_message(start_time.strftime('%Y-%m-%d %H:%M UTC'))
-            send_telegram_message(summary_message)
-            print("Retrain summary sent to Telegram.")
-
-            sleep_seconds = seconds_until_next_4h_utc()
-            print(f"Sleeping {sleep_seconds:.0f} seconds until next 4-hour UTC boundary.")
-            time.sleep(sleep_seconds)
-
+            start = datetime.utcnow()
+            timestamp = start.strftime('%Y-%m-%d %H:%M UTC')
+            print(f"\nStarting scan at {timestamp}")
+            coin_results = []
+            workers = min(16, (os.cpu_count() or 1) * 2 + 1)
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(process_symbol, sym): sym for sym in CRYPTO_SYMBOLS}
+                for fut in as_completed(futures):
+                    res = fut.result()
+                    if res:
+                        coin_results.append(res)
+            print(f"Scan complete: {len(coin_results)} signals detected.")
+            msg = format_summary_message(coin_results, timestamp)
+            send_telegram_message(msg)
+            sleep = seconds_until_next_4h_utc()
+            print(f"Sleeping {sleep:.0f}s until next 4h UTC.")
+            time.sleep(sleep)
     except KeyboardInterrupt:
-        print("Interrupted by user. Exiting.")
+        print("Interrupted. Exiting.")
         cleanup()
 
 if __name__ == "__main__":
