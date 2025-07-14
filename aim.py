@@ -13,6 +13,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
+import math
 
 # --- Launch Webserver Subprocess ---
 webserver_path = os.path.join(os.path.dirname(__file__), 'webserver.py')
@@ -208,7 +209,6 @@ def train_ml_model():
         if len(ml_X) > len(INDICATOR_FUNCTIONS)*5:
             try:
                 base_ml_model.fit(np.array(ml_X), np.array(ml_y))
-                # Calibrate probabilities using Platt scaling (sigmoid)
                 calibrated_ml_model = CalibratedClassifierCV(base_ml_model, cv='prefit', method='sigmoid')
                 calibrated_ml_model.fit(np.array(ml_X), np.array(ml_y))
                 ml_trained = True
@@ -228,7 +228,6 @@ def ml_predict(signals):
     try:
         proba = calibrated_ml_model.predict_proba(feats)[0]
         max_proba = max(proba)
-        # Return None if max probability is too low (less than 55%)
         if max_proba < 0.55:
             return None, 0.0
         if proba[1] > proba[0]:
@@ -255,7 +254,6 @@ def adaptive_signal(df):
             return "buy", (up_w / total) * 100, signals, regime
         if down_w > up_w * 1.2:
             return "sell", (down_w / total) * 100, signals, regime
-    # If all indicators agree, use average weight as confidence instead of fixed 75%
     if all(s == "up" for s in signals.values() if s is not None):
         avg_conf = np.mean([get_indicator_weight(n, regime) for n in INDICATOR_FUNCTIONS]) * 100
         return "buy", avg_conf, signals, regime
@@ -307,86 +305,16 @@ def fetch_latest_ohlcv(symbol, timeframe='4h', limit=750):
         print(f"Error fetching {symbol}: {e}")
         return None
 
-# --- Portfolio Management & Position Sizing ---
+# --- Position Sizing for $1 max trade with 15x leverage ---
+MAX_UNLEVERAGED_NOTIONAL = 1.0  # $1 max notional per trade
+LEVERAGE = 15                  # 15x leverage
 
-import sqlite3
-import contextlib
-import time
-
-# Configuration for portfolio and risk management
-PORTFOLIO_VALUE = 10_000.0  # initial portfolio value in USD
-MAX_RISK_PER_TRADE = 0.01   # 1% risk per trade
-MAX_POSITION_PCT = 0.20     # max 20% portfolio in one position
-KELLY_ENABLED = True        # enable Kelly sizing
-KELLY_FRACTION = 0.25       # fraction of Kelly to use (safer)
-
-DB_FILE = "portfolio.db"
-
-@contextlib.contextmanager
-def get_db():
-    con = sqlite3.connect(DB_FILE)
-    con.execute("""CREATE TABLE IF NOT EXISTS trades(
-        id INTEGER PRIMARY KEY, ts INTEGER, symbol TEXT,
-        side TEXT, qty REAL, price REAL, pnl REAL)""")
-    con.execute("""CREATE TABLE IF NOT EXISTS equity(
-        ts INTEGER PRIMARY KEY, value REAL)""")
-    yield con
-    con.commit()
-    con.close()
-
-def record_trade(symbol, side, qty, price, pnl=0.0):
-    with get_db() as db:
-        db.execute("INSERT INTO trades(ts,symbol,side,qty,price,pnl) VALUES(?,?,?,?,?,?)",
-                   (int(time.time()), symbol, side, qty, price, pnl))
-
-def record_equity(value):
-    with get_db() as db:
-        db.execute("INSERT OR REPLACE INTO equity(ts,value) VALUES(?,?)",
-                   (int(time.time()), value))
-
-def load_performance(window=150):
-    with get_db() as db:
-        rows = db.execute("SELECT pnl FROM trades ORDER BY ts DESC LIMIT ?",
-                          (window,)).fetchall()
-    if not rows: return [], []
-    wins  = [r[0] for r in rows if r[0] > 0]
-    losses= [-r[0] for r in rows if r[0] < 0]
-    return wins, losses
-
-def kelly_fraction():
-    wins, losses = load_performance()
-    if len(wins) + len(losses) < 30:
-        return 0.0
-    W = len(wins) / (len(wins) + len(losses))
-    R = (np.mean(wins) / np.mean(losses)) if losses else 0.0
-    k = W - (1 - W) / R if R else 0.0
-    return max(0.0, k)
-
-def dollar_risk(equity):
-    return equity * MAX_RISK_PER_TRADE
-
-def calculate_position_size(equity, price, stop_loss_pct):
-    risk_amount = dollar_risk(equity)
-    if KELLY_ENABLED:
-        k = kelly_fraction()
-        risk_amount *= (1 + k * KELLY_FRACTION)
-    qty = risk_amount / (price * stop_loss_pct) if stop_loss_pct > 0 else 0
-    max_qty = (equity * MAX_POSITION_PCT) / price
-    return min(qty, max_qty)
-
-# --- Global equity tracker ---
-current_equity = PORTFOLIO_VALUE
-
-def execute_trade(symbol, side, qty, price, stop_loss_pct, take_profit_pct):
-    global current_equity
-    notional = qty * price
-    if side == "buy":
-        current_equity -= notional
-    elif side == "sell":
-        current_equity += notional
-    record_trade(symbol, side, qty, price)
-    record_equity(current_equity)
-    print(f"Executed {side} {qty:.4f} {symbol} @ {price:.4f}, equity now {current_equity:.2f}")
+def calculate_position_size_dollars(price):
+    units = math.floor(MAX_UNLEVERAGED_NOTIONAL / price)
+    if units == 0:
+        return 0.0, 0
+    notional = units * price
+    return notional, units
 
 # --- Process a Single Symbol with Position Sizing ---
 def process_symbol(symbol):
@@ -404,11 +332,11 @@ def process_symbol(symbol):
         avg_perf = sum(weights) / len(weights) if weights else 0.5
         ttp = determine_trailing_take_profit(regime, avg_perf)
         stop_loss_pct = (ttp / 100) * 0.5  # stop loss at half trailing TP
-        pos_size = calculate_position_size(current_equity, price, stop_loss_pct)
-        if pos_size < 1e-8:
-            return None
-        # Optionally execute trade here:
-        # execute_trade(symbol, sig, pos_size, price, stop_loss_pct, ttp / 100)
+
+        notional_usd, units = calculate_position_size_dollars(price)
+        if units == 0:
+            return None  # price too high for $1 max trade
+
         return {
             "symbol": symbol,
             "signal": sig,
@@ -418,15 +346,17 @@ def process_symbol(symbol):
             "current_price": price,
             "ttp_percent": ttp,
             "stop_loss_pct": stop_loss_pct * 100,
-            "position_size": pos_size,
-            "notional_usd": pos_size * price
+            "position_size_units": units,
+            "position_size_usd": notional_usd,
+            "leverage": LEVERAGE
         }
     return None
 
 # --- Message Formatting ---
 def format_single_coin_detail(symbol, signal, confidence, indicator_states,
                               regime, price_str, ttp_percent=None,
-                              stop_loss_pct=None, position_size=None, notional_usd=None):
+                              stop_loss_pct=None, position_size_units=None,
+                              position_size_usd=None, leverage=None):
     emo = "🟢 BUY" if signal == "buy" else "🔴 SELL"
     reg_emo = "📈 High Volatility" if regime == "high_vol" else "📉 Low Volatility" if regime == "low_vol" else "❓ Unknown"
     commentary = {
@@ -441,7 +371,10 @@ def format_single_coin_detail(symbol, signal, confidence, indicator_states,
     display_confidence = min(confidence, 99.9)
     ttp_line = f"  <b>Trailing Take Profit:</b> <code>{ttp_percent:.2f}%</code>\n" if ttp_percent else ""
     sl_line = f"  <b>Stop Loss Distance:</b> <code>{stop_loss_pct:.2f}%</code>\n" if stop_loss_pct else ""
-    pos_line = f"  <b>Position Size:</b> <code>{position_size:.4f} units ≈ ${notional_usd:,.2f}</code>\n" if position_size and notional_usd else ""
+    pos_line = ""
+    if position_size_units is not None and position_size_usd is not None and leverage is not None:
+        pos_line = (f"  <b>Position Size:</b> <code>{position_size_units} units ≈ ${position_size_usd:.2f}</code>\n"
+                    f"  <b>Leverage:</b> <code>{leverage}x</code>\n")
     return (
         f"<b>{symbol} | {emo} ({display_confidence:.1f}%)</b>\n"
         f"  <b>Price:</b> <code>{price_str}</code>\n"
@@ -476,8 +409,9 @@ def format_summary_message(coin_results, timestamp_str):
             f"{res['current_price']:.4f}" if res['current_price'] < 10 else f"{res['current_price']:.2f}",
             ttp_percent=res.get('ttp_percent'),
             stop_loss_pct=res.get('stop_loss_pct'),
-            position_size=res.get('position_size'),
-            notional_usd=res.get('notional_usd')
+            position_size_units=res.get('position_size_units'),
+            position_size_usd=res.get('position_size_usd'),
+            leverage=res.get('leverage')
         ) for res in sorted_results[:5]
     )
     closing = np.random.choice([
