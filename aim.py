@@ -111,12 +111,12 @@ initialize_exchange()
 
 # ────────────────────  Symbols universe (trimmed)  ───────────────────────────
 CRYPTO_SYMBOLS = [
-    "XRP/USDT", "XMR/USDT", "GMX/USDT", "LUNA/USDT", "TRX/USDT", "EIGEN/USDT",
-    "APE/USDT", "WAVES/USDT", "PLUME/USDT", "SUSHI/USDT", "DOGE/USDT",
-    "VIRTUAL/USDT", "CAKE/USDT", "GRASS/USDT", "AAVE/USDT", "SUI/USDT",
-    "ARB/USDT", "XLM/USDT", "MNT/USDT", "LTC/USDT", "NEAR/USDT",
+    "XRP/USDT", "SUI/USDT", "DOGE/USDT", "XLM/USDT", "TRX/USDT",
+    "AAVE/USDT", "LTC/USDT", "ARB/USDT", "NEAR/USDT", "MNT/USDT",
+    "VIRTUAL/USDT", "XMR/USDT", "EIGEN/USDT", "CAKE/USDT", "SUSHI/USDT",
+    "GRASS/USDT", "WAVES/USDT", "APE/USDT", "SKL/USDT", "PLUME/USDT",
+    "LUNA/USDT"
 ]
-
 # ────────────────────  Technical-indicator helpers  ───────────────────────────
 def calculate_rsi(series: pd.Series, period: int = 13) -> pd.Series:
     delta = series.diff()
