@@ -280,9 +280,10 @@ def backtest_update(df):
 
 # --- Trailing Take Profit Logic ---
 def determine_trailing_take_profit(regime, accuracy):
-    base = 3.0 if regime == "high_vol" else 1.0
+    # Adjusted larger TTP and stop loss for 12h candles and 5x leverage
+    base = 9.0 if regime == "high_vol" else 3.0  # approximately 3x wider than for 4h candles
     adjusted = base * (1.5 - accuracy)
-    return max(0.5, min(adjusted, 4.0))
+    return max(0.5, min(adjusted, 12.0))  # cap max at 12%
 
 # --- Fetch OHLCV Data ---
 def fetch_latest_ohlcv(symbol, timeframe='12h', limit=250):
@@ -305,7 +306,7 @@ def fetch_latest_ohlcv(symbol, timeframe='12h', limit=250):
 
 # --- Position Sizing for $1 max trade with 5x leverage ---
 MAX_UNLEVERAGED_NOTIONAL = 1.0  # $1 max notional per trade
-LEVERAGE = 5                    # 5x leverage (adjusted for 12h candles)
+LEVERAGE = 5                    # 5x leverage for 12h candles
 
 def calculate_position_size_dollars(price):
     units = math.floor(MAX_UNLEVERAGED_NOTIONAL / price)
