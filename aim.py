@@ -294,42 +294,52 @@ def backtest_update(df):
 
 # --- Volatility Estimation Helper ---
 def calculate_recent_volatility(df, window=20):
+    # Calculate annualized volatility approximation for last 'window' closes
     if len(df) < window + 1:
         return 0.0
     log_returns = np.log(df['close'] / df['close'].shift(1)).dropna()
-    # Annualize volatility for 6h candles: 4 candles/day * 365 = 1460 periods per year
-    vol = log_returns.rolling(window).std().iloc[-1] * np.sqrt(1460)
+    vol = log_returns.rolling(window).std().iloc[-1] * np.sqrt(365 * 24 / 12)  # annualize assuming 12h candles
     return vol
 
 # --- Dynamic Stop Loss and Take Profit based on ML and Volatility ---
 def determine_dynamic_ttp_and_sl(df, regime, ml_conf):
+    # Base trailing take profit targets and stop loss distances (percent)
+    # Use ML confidence and recent volatility to adapt targets
+    
+    # Calculate recent volatility (log returns annualized)
     volatility = calculate_recent_volatility(df, window=20)
-    volatility = min(volatility, 2.0)  # cap at 200% annualized vol
+    # Cap volatility for stability
+    volatility = min(volatility, 2.0)  # max 200% annual vol
 
+    # Base TTP and Stop Loss settings by regime
     if regime == "high_vol":
-        base_ttp = 8.0
-        base_sl = 4.0
+        base_ttp = 8.0  # base trailing TP 8% in high volatility
+        base_sl = 4.0   # base stop loss 4%
     elif regime == "low_vol":
-        base_ttp = 3.0
-        base_sl = 1.5
-    else:
+        base_ttp = 3.0  # base trailing TP 3% in low volatility
+        base_sl = 1.5   # base stop loss 1.5%
+    else:  # unknown regime fallback
         base_ttp = 4.0
         base_sl = 2.0
 
-    ttp = base_ttp * (1 + volatility / 2)
-    sl = base_sl * (1 + volatility / 2)
+    # Scale base targets by volatility (higher vol => wider TTP and SL)
+    ttp = base_ttp * (1 + volatility/2)
+    sl = base_sl * (1 + volatility/2)
 
-    ml_factor = min(ml_conf / 100, 1.0)
+    # Adjust targets by ML confidence: higher confidence narrows the SL, slightly widens TTP
+    ml_factor = min(ml_conf / 100, 1.0)  # normalize 0 to 1
+    # More confident: TTP up to +20%, SL reduced down to 70%
     ttp *= (1 + 0.2 * ml_factor)
     sl *= (1 - 0.3 * ml_factor)
 
-    ttp = max(1.5, min(ttp, 15.0))
-    sl = max(0.7, min(sl, ttp * 0.9))
+    # Safety caps
+    ttp = max(1.5, min(ttp, 15.0))   # TTP between 1.5% and 15%
+    sl = max(0.7, min(sl, ttp * 0.9))  # SL between 0.7% and 90% of TTP
 
     return ttp, sl
 
 # --- Fetch OHLCV Data ---
-def fetch_latest_ohlcv(symbol, timeframe='6h', limit=750):
+def fetch_latest_ohlcv(symbol, timeframe='12h', limit=750):
     try:
         with exchange_lock:
             if symbol not in exchange.symbols:
@@ -348,8 +358,8 @@ def fetch_latest_ohlcv(symbol, timeframe='6h', limit=750):
         return None
 
 # --- Position Sizing for $1 max trade with 15x leverage ---
-MAX_UNLEVERAGED_NOTIONAL = 1.0
-LEVERAGE = 15
+MAX_UNLEVERAGED_NOTIONAL = 1.0  # $1 max notional per trade
+LEVERAGE = 15                  # 15x leverage
 
 def calculate_position_size_dollars(price):
     units = math.floor(MAX_UNLEVERAGED_NOTIONAL / price)
@@ -360,7 +370,7 @@ def calculate_position_size_dollars(price):
 
 # --- Process a Single Symbol with Dynamic Risk Controls ---
 def process_symbol(symbol):
-    df = fetch_latest_ohlcv(symbol, timeframe='6h')
+    df = fetch_latest_ohlcv(symbol)
     if df is None or len(df) < 100:
         return None
     df = calculate_indicators(df.copy())
@@ -370,11 +380,12 @@ def process_symbol(symbol):
     sig, conf, states, regime = adaptive_signal(df)
     if sig in ("buy", "sell") and conf >= 55.0:
         price = df['close'].iloc[-1]
+        # Use new dynamic stop loss and take profit method
         ttp, stop_loss_pct = determine_dynamic_ttp_and_sl(df, regime, conf)
 
         notional_usd, units = calculate_position_size_dollars(price)
         if units == 0:
-            return None
+            return None  # price too high for $1 max trade
 
         return {
             "symbol": symbol,
@@ -426,15 +437,17 @@ def format_single_coin_detail(symbol, signal, confidence, indicator_states,
 def format_summary_message(coin_results, timestamp_str):
     if not coin_results:
         return (
-            f"<b>📊 Market Scan @ {timestamp_str} (6h TF)</b>\n\n"
+            f"<b>📊 Market Scan @ {timestamp_str} (12h TF)</b>\n\n"
             f"<i>No strong BUY/SELL signals detected.</i>"
         )
     sorted_results = sorted(coin_results, key=lambda x: x['confidence'], reverse=True)
     hour = datetime.utcnow().hour
-    greeting = ("🌅 Good morning" if 5 <= hour < 12 else "🌞 Good afternoon" if 12 <= hour < 18 else "🌙 Good evening")
+    greeting = ("🌅 Good morning" if 5 <= hour < 12 else
+                "🌞 Good afternoon" if 12 <= hour < 18 else
+                "🌙 Good evening")
     header = (
         f"{greeting}, trader!\n"
-        f"<b>📊 Crypto Signals Scan @ {timestamp_str} (6h TF)</b>\n"
+        f"<b>📊 Crypto Signals Scan @ {timestamp_str} (12h TF)</b>\n"
         f"<i>Top {min(5, len(sorted_results))} opportunities:</i>\n"
     )
     perf = "<b>🧠 System Overview:</b>\n" + "".join(
@@ -461,9 +474,9 @@ def format_summary_message(coin_results, timestamp_str):
     return header + perf + details + closing
 
 # --- Scheduling Utilities ---
-def seconds_until_next_6h_utc():
+def seconds_until_next_12h_utc():
     now = datetime.utcnow()
-    next_hour = ((now.hour // 6) + 1) * 6 % 24
+    next_hour = ((now.hour // 12) + 1) * 12 % 24
     next_run = datetime.combine(now.date(), datetime.min.time()) + timedelta(hours=next_hour)
     if next_run <= now:
         next_run += timedelta(days=1)
@@ -487,8 +500,8 @@ def main():
             print(f"Scan complete: {len(coin_results)} signals detected.")
             msg = format_summary_message(coin_results, timestamp)
             send_telegram_message(msg)
-            sleep = seconds_until_next_6h_utc()
-            print(f"Sleeping {sleep:.0f}s until next 6h UTC.")
+            sleep = seconds_until_next_12h_utc()
+            print(f"Sleeping {sleep:.0f}s until next 12h UTC.")
             time.sleep(sleep)
     except KeyboardInterrupt:
         print("Interrupted. Exiting.")
