@@ -136,7 +136,8 @@ def calculate_indicators(df):
     k, d = calculate_stoch_rsi(df)
     df['stochrsi_k'], df['stochrsi_d'] = k, d
     wr = calculate_multi_wr(df)
-    for L, series in wr.items(): df[f'wr_{L}'] = series
+    for L, series in wr.items():
+        df[f'wr_{L}'] = series
     kdj_k, kdj_d, kdj_j = calculate_kdj(df)
     df['kdj_k'], df['kdj_d'], df['kdj_j'] = kdj_k, kdj_d, kdj_j
     macd_line, macd_signal = calculate_macd(df['close'])
@@ -147,17 +148,23 @@ def calculate_indicators(df):
 
 # --- Indicator Signal Analysis ---
 def analyze_trend(series1, series2, idx):
-    if idx < 1 or pd.isna(series1.iloc[idx]) or pd.isna(series2.iloc[idx]): return None
-    if series1.iloc[idx] > series2.iloc[idx]: return "up"
-    if series1.iloc[idx] < series2.iloc[idx]: return "down"
+    if idx < 1 or pd.isna(series1.iloc[idx]) or pd.isna(series2.iloc[idx]):
+        return None
+    if series1.iloc[idx] > series2.iloc[idx]:
+        return "up"
+    if series1.iloc[idx] < series2.iloc[idx]:
+        return "down"
     return None
 
 def analyze_wr_positions(wr_dict, idx):
     try:
         w8, w3, w144, w233, w55 = (wr_dict[x].iloc[idx] for x in (8,3,144,233,55))
-    except: return None
-    if w8 > w233 and w3 > w233 and w8 > w144 and w3 > w144: return "up"
-    if w8 < w55 and w3 < w55: return "down"
+    except:
+        return None
+    if w8 > w233 and w3 > w233 and w8 > w144 and w3 > w144:
+        return "up"
+    if w8 < w55 and w3 < w55:
+        return "down"
     return None
 
 INDICATOR_FUNCTIONS = {
@@ -183,28 +190,31 @@ ml_trained = False
 ml_lock = threading.Lock()
 
 def get_market_regime(df, window=50, threshold=0.02):
-    if len(df) < window: return "unknown"
+    if len(df) < window:
+        return "unknown"
     vol = df['close'].pct_change().rolling(window).std().iloc[-1]
     return "high_vol" if vol > threshold else "low_vol"
 
 def update_indicator_performance(name, regime, correct):
-    if regime == "unknown": return
+    if regime == "unknown":
+        return
     indicator_performance_regime[name][regime].append(1 if correct else 0)
 
 def get_indicator_weight(name, regime):
-    if regime == "unknown": return 0.5
+    if regime == "unknown":
+        return 0.5
     perf = indicator_performance_regime[name][regime]
-    return sum(perf)/len(perf) if perf else 0.5
+    return sum(perf) / len(perf) if perf else 0.5
 
 def add_ml_sample(signals, price_move):
-    feats = [(1 if s=="up" else -1 if s=="down" else 0) for s in signals.values()]
+    feats = [(1 if s == "up" else -1 if s == "down" else 0) for s in signals.values()]
     ml_X.append(feats)
-    ml_y.append(1 if price_move>0 else 0)
+    ml_y.append(1 if price_move > 0 else 0)
 
 def train_ml_model():
     global ml_trained, calibrated_ml_model
     with ml_lock:
-        if len(ml_X) > len(INDICATOR_FUNCTIONS)*5:
+        if len(ml_X) > len(INDICATOR_FUNCTIONS) * 5:
             try:
                 base_ml_model.fit(np.array(ml_X), np.array(ml_y))
                 calibrated_ml_model = CalibratedClassifierCV(base_ml_model, cv='prefit', method='sigmoid')
@@ -222,16 +232,16 @@ def train_ml_model():
 def ml_predict(signals):
     if not ml_trained or calibrated_ml_model is None:
         return None, 0.0
-    feats = np.array([(1 if s=="up" else -1 if s=="down" else 0) for s in signals.values()]).reshape(1,-1)
+    feats = np.array([(1 if s == "up" else -1 if s == "down" else 0) for s in signals.values()]).reshape(1, -1)
     try:
         proba = calibrated_ml_model.predict_proba(feats)[0]
         max_proba = max(proba)
         if max_proba < 0.55:
             return None, 0.0
         if proba[1] > proba[0]:
-            return "buy", proba[1]*100
+            return "buy", proba[1] * 100
         else:
-            return "sell", proba[0]*100
+            return "sell", proba[0] * 100
     except Exception as e:
         print(f"ML prediction error: {e}")
         return None, 0.0
@@ -245,8 +255,12 @@ def adaptive_signal(df):
     up_w = down_w = total = 0
     for n, s in signals.items():
         w = get_indicator_weight(n, regime)
-        if s=="up": up_w+=w; total+=w
-        if s=="down": down_w+=w; total+=w
+        if s == "up":
+            up_w += w
+            total += w
+        if s == "down":
+            down_w += w
+            total += w
     if total > 0.1:
         if up_w > down_w * 1.2:
             return "buy", (up_w / total) * 100, signals, regime
@@ -265,7 +279,7 @@ def backtest_update(df):
     if len(df) < start + 2:
         return
     for i in range(start, len(df) - 1):
-        regime = get_market_regime(df[:i + 1])
+        regime = get_market_regime(df[: i + 1])
         if regime == "unknown":
             continue
         sigs = {n: fn(df, i) for n, fn in INDICATOR_FUNCTIONS.items()}
@@ -278,15 +292,44 @@ def backtest_update(df):
         add_ml_sample(sigs, p1 - p0)
     train_ml_model()
 
-# --- Trailing Take Profit Logic ---
-def determine_trailing_take_profit(regime, accuracy):
-    # Adjusted larger TTP and stop loss for 12h candles and 5x leverage
-    base = 9.0 if regime == "high_vol" else 3.0  # approximately 3x wider than for 4h candles
-    adjusted = base * (1.5 - accuracy)
-    return max(0.5, min(adjusted, 12.0))  # cap max at 12%
+# --- Volatility Estimation Helper ---
+def calculate_recent_volatility(df, window=20):
+    if len(df) < window + 1:
+        return 0.0
+    log_returns = np.log(df['close'] / df['close'].shift(1)).dropna()
+    # Annualize volatility for 6h candles: 4 candles/day * 365 = 1460 periods per year
+    vol = log_returns.rolling(window).std().iloc[-1] * np.sqrt(1460)
+    return vol
+
+# --- Dynamic Stop Loss and Take Profit based on ML and Volatility ---
+def determine_dynamic_ttp_and_sl(df, regime, ml_conf):
+    volatility = calculate_recent_volatility(df, window=20)
+    volatility = min(volatility, 2.0)  # cap at 200% annualized vol
+
+    if regime == "high_vol":
+        base_ttp = 8.0
+        base_sl = 4.0
+    elif regime == "low_vol":
+        base_ttp = 3.0
+        base_sl = 1.5
+    else:
+        base_ttp = 4.0
+        base_sl = 2.0
+
+    ttp = base_ttp * (1 + volatility / 2)
+    sl = base_sl * (1 + volatility / 2)
+
+    ml_factor = min(ml_conf / 100, 1.0)
+    ttp *= (1 + 0.2 * ml_factor)
+    sl *= (1 - 0.3 * ml_factor)
+
+    ttp = max(1.5, min(ttp, 15.0))
+    sl = max(0.7, min(sl, ttp * 0.9))
+
+    return ttp, sl
 
 # --- Fetch OHLCV Data ---
-def fetch_latest_ohlcv(symbol, timeframe='12h', limit=250):
+def fetch_latest_ohlcv(symbol, timeframe='6h', limit=750):
     try:
         with exchange_lock:
             if symbol not in exchange.symbols:
@@ -304,9 +347,9 @@ def fetch_latest_ohlcv(symbol, timeframe='12h', limit=250):
         print(f"Error fetching {symbol}: {e}")
         return None
 
-# --- Position Sizing for $1 max trade with 5x leverage ---
-MAX_UNLEVERAGED_NOTIONAL = 1.0  # $1 max notional per trade
-LEVERAGE = 5                    # 5x leverage for 12h candles
+# --- Position Sizing for $1 max trade with 15x leverage ---
+MAX_UNLEVERAGED_NOTIONAL = 1.0
+LEVERAGE = 15
 
 def calculate_position_size_dollars(price):
     units = math.floor(MAX_UNLEVERAGED_NOTIONAL / price)
@@ -315,26 +358,23 @@ def calculate_position_size_dollars(price):
     notional = units * price
     return notional, units
 
-# --- Process a Single Symbol with Position Sizing ---
+# --- Process a Single Symbol with Dynamic Risk Controls ---
 def process_symbol(symbol):
-    df = fetch_latest_ohlcv(symbol)
+    df = fetch_latest_ohlcv(symbol, timeframe='6h')
     if df is None or len(df) < 100:
         return None
     df = calculate_indicators(df.copy())
-    sub = df.iloc[-250:]
+    sub = df.iloc[-750:]
     if len(sub) > 50:
         backtest_update(sub)
     sig, conf, states, regime = adaptive_signal(df)
     if sig in ("buy", "sell") and conf >= 55.0:
         price = df['close'].iloc[-1]
-        weights = [get_indicator_weight(n, regime) for n in INDICATOR_FUNCTIONS]
-        avg_perf = sum(weights) / len(weights) if weights else 0.5
-        ttp = determine_trailing_take_profit(regime, avg_perf)
-        stop_loss_pct = (ttp / 100) * 0.5  # stop loss at half trailing TP
+        ttp, stop_loss_pct = determine_dynamic_ttp_and_sl(df, regime, conf)
 
         notional_usd, units = calculate_position_size_dollars(price)
         if units == 0:
-            return None  # price too high for $1 max trade
+            return None
 
         return {
             "symbol": symbol,
@@ -344,7 +384,7 @@ def process_symbol(symbol):
             "regime": regime,
             "current_price": price,
             "ttp_percent": ttp,
-            "stop_loss_pct": stop_loss_pct * 100,
+            "stop_loss_pct": stop_loss_pct,
             "position_size_units": units,
             "position_size_usd": notional_usd,
             "leverage": LEVERAGE
@@ -386,7 +426,7 @@ def format_single_coin_detail(symbol, signal, confidence, indicator_states,
 def format_summary_message(coin_results, timestamp_str):
     if not coin_results:
         return (
-            f"<b>📊 Market Scan @ {timestamp_str} (12h TF)</b>\n\n"
+            f"<b>📊 Market Scan @ {timestamp_str} (6h TF)</b>\n\n"
             f"<i>No strong BUY/SELL signals detected.</i>"
         )
     sorted_results = sorted(coin_results, key=lambda x: x['confidence'], reverse=True)
@@ -394,7 +434,7 @@ def format_summary_message(coin_results, timestamp_str):
     greeting = ("🌅 Good morning" if 5 <= hour < 12 else "🌞 Good afternoon" if 12 <= hour < 18 else "🌙 Good evening")
     header = (
         f"{greeting}, trader!\n"
-        f"<b>📊 Crypto Signals Scan @ {timestamp_str} (12h TF)</b>\n"
+        f"<b>📊 Crypto Signals Scan @ {timestamp_str} (6h TF)</b>\n"
         f"<i>Top {min(5, len(sorted_results))} opportunities:</i>\n"
     )
     perf = "<b>🧠 System Overview:</b>\n" + "".join(
@@ -421,9 +461,9 @@ def format_summary_message(coin_results, timestamp_str):
     return header + perf + details + closing
 
 # --- Scheduling Utilities ---
-def seconds_until_next_12h_utc():
+def seconds_until_next_6h_utc():
     now = datetime.utcnow()
-    next_hour = ((now.hour // 12) + 1) * 12 % 24
+    next_hour = ((now.hour // 6) + 1) * 6 % 24
     next_run = datetime.combine(now.date(), datetime.min.time()) + timedelta(hours=next_hour)
     if next_run <= now:
         next_run += timedelta(days=1)
@@ -447,8 +487,8 @@ def main():
             print(f"Scan complete: {len(coin_results)} signals detected.")
             msg = format_summary_message(coin_results, timestamp)
             send_telegram_message(msg)
-            sleep = seconds_until_next_12h_utc()
-            print(f"Sleeping {sleep:.0f}s until next 12h UTC.")
+            sleep = seconds_until_next_6h_utc()
+            print(f"Sleeping {sleep:.0f}s until next 6h UTC.")
             time.sleep(sleep)
     except KeyboardInterrupt:
         print("Interrupted. Exiting.")
