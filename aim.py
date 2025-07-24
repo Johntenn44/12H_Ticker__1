@@ -19,11 +19,11 @@ import random
 # ========================================================================
 # Global Settings for 12-hour candles
 # ========================================================================
-TIMEFRAME = '12h'             # 12-hour candle timeframe
-CANDLE_DESC = '12h TF'        # human label for messages
-MAX_WORKERS = 4               # thread-pool workers
-MAX_RISK_PER_TRADE_USD = 10   # risk capital per trade
-BASE_MAX_LEVERAGE = 20        # hard cap on leverage
+TIMEFRAME = '12h'            # 12-hour candle timeframe
+CANDLE_DESC = '12h TF'       # human label for messages
+MAX_WORKERS = 4              # thread-pool workers
+MAX_RISK_PER_TRADE_USD = 10  # risk capital per trade
+BASE_MAX_LEVERAGE = 20       # hard cap on leverage
 
 # Launch webserver subprocess if needed
 webserver_path = os.path.join(os.path.dirname(__file__), 'webserver.py')
@@ -355,7 +355,14 @@ def determine_adaptive_leverage(regime, ml_conf, price):
     return int(min(max(leverage, 1), BASE_MAX_LEVERAGE))
 
 def determine_dynamic_ttp_and_sl(df, regime, ml_conf, indicator_states):
-    base_map = {'12h': (6.0, 3.0), '1d': (8.0, 4.0), '4h': (5.0, 2.5), '1h': (3.0, 1.5)}
+    base_map = {
+        '12h': (6.0, 3.0),
+        '1d': (8.0, 4.0),
+        '4h': (5.0, 2.5),
+        '1h': (3.0, 1.5),
+        '8h': (5.5, 2.75),
+        '6h': (4.0, 2.0)
+    }
     base_ttp, base_sl = base_map.get(TIMEFRAME, (4.0, 2.0))
     if regime == "high_vol":
         base_ttp *= 1.3
@@ -537,10 +544,8 @@ def format_summary_message(signal_results, timestamp_str):
     ])
     return header + system_perf + top_details + closing_remarks
 
-def seconds_until_next_daily_utc():
-    now = datetime.utcnow()
-    next_midnight = datetime.combine(now.date() + timedelta(days=1), datetime.min.time())
-    return (next_midnight - now).total_seconds()
+def sleep_for_12_hours():
+    return 12 * 3600  # 12 hours in seconds
 
 def main():
     try:
@@ -557,8 +562,8 @@ def main():
                         results.append(res)
             print(f"Scan completed with {len(results)} signals.")
             send_telegram_message(format_summary_message(results, timestamp))
-            sleep_seconds = seconds_until_next_daily_utc()
-            print(f"Sleeping for {sleep_seconds:.0f} seconds until next daily close.")
+            sleep_seconds = sleep_for_12_hours()
+            print(f"Sleeping for {sleep_seconds / 3600:.0f} hours until next run.")
             time.sleep(sleep_seconds)
     except KeyboardInterrupt:
         print("Interrupted by user, exiting.")
