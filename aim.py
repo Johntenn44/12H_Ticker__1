@@ -356,7 +356,7 @@ def determine_adaptive_leverage(regime, ml_conf, price):
 
 def determine_dynamic_ttp_and_sl(df, regime, ml_conf, indicator_states):
     base_map = {
-        '12h': (6.0, 3.0),
+        '12h': (6.0, 3.0),  # 12h timeframe
         '1d': (8.0, 4.0),
         '4h': (5.0, 2.5),
         '1h': (3.0, 1.5),
@@ -502,13 +502,19 @@ def format_single_signal_detail(res):
                "📉 Low Volatility" if res["regime"] == "low_vol" else "❓ Unknown"
     price_str = f"{res['price']:.4f}" if res["price"] < 10 else f"{res['price']:.2f}"
     confidence_str = min(res["confidence"], 99.9)
+    # Calculate TTP! (Trailing Take Profit divided by leverage)
+    ttp_div_lev = res["ttp_pct"] / res["leverage"] if res["leverage"] else 0.0
+    # Calculate STOP_LOSS! (Stop Loss divided by leverage)
+    stoploss_div_lev = res["stop_loss_pct"] / res["leverage"] if res["leverage"] else 0.0
     return (
         f"<b>{res['symbol']} | {emoji} ({confidence_str:.1f}%)</b>\n"
         f"  <b>Price:</b> <code>{price_str}</code>\n"
         f"  <b>Market:</b> {volemoji}\n"
         f"  <b>Leverage:</b> <code>{res['leverage']}x</code>\n"
         f"  <b>Trailing TP:</b> <code>{res['ttp_pct']:.2f}%</code>\n"
+        f"  <b>TTP! (Adj):</b> <code>{ttp_div_lev:.2f}%</code>\n"
         f"  <b>Stop Loss:</b> <code>{res['stop_loss_pct']:.2f}%</code>\n"
+        f"  <b>STOP_LOSS! (Adj):</b> <code>{stoploss_div_lev:.2f}%</code>\n"
         f"  <b>Position:</b> <code>{res['units']} units ≈ ${res['pos_usd']:.2f}</code>\n"
         f"  <i>{res['comment']}</i>\n"
         f"  <u>Indicators:</u>\n{format_indicator_states(res['indicator_states'])}\n"
@@ -571,11 +577,11 @@ def main():
             send_telegram_message(format_summary_message(results, timestamp))
 
             elapsed = (datetime.utcnow() - start_time).total_seconds()
-            sleep_seconds = 12 * 3600 - elapsed
+            sleep_seconds = 12 * 3600 - elapsed  # 12 hours interval
 
             if sleep_seconds > 0:
                 print(f"Sleeping for {sleep_seconds / 3600:.2f} hours until next run in smaller chunks.")
-                sleep_in_chunks(sleep_seconds, chunk_seconds=60)  # Chunk size 60 seconds; adjust if needed
+                sleep_in_chunks(sleep_seconds, chunk_seconds=60)  # Sleep in 60-second chunks
             else:
                 print("Processing took longer than 12 hours, starting next run immediately.")
     except KeyboardInterrupt:
