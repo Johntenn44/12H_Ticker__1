@@ -544,8 +544,15 @@ def format_summary_message(signal_results, timestamp_str):
     ])
     return header + system_perf + top_details + closing_remarks
 
-def sleep_for_12_hours():
-    return 12 * 3600  # 12 hours in seconds
+# ========================================================================
+# Sleep utility to avoid oversleeping and support small chunks
+# ========================================================================
+def sleep_in_chunks(total_sleep_seconds, chunk_seconds=60):
+    remaining = total_sleep_seconds
+    while remaining > 0:
+        sleep_time = min(chunk_seconds, remaining)
+        time.sleep(sleep_time)
+        remaining -= sleep_time
 
 def main():
     try:
@@ -562,9 +569,15 @@ def main():
                         results.append(res)
             print(f"Scan completed with {len(results)} signals.")
             send_telegram_message(format_summary_message(results, timestamp))
-            sleep_seconds = sleep_for_12_hours()
-            print(f"Sleeping for {sleep_seconds / 3600:.0f} hours until next run.")
-            time.sleep(sleep_seconds)
+
+            elapsed = (datetime.utcnow() - start_time).total_seconds()
+            sleep_seconds = 12 * 3600 - elapsed
+
+            if sleep_seconds > 0:
+                print(f"Sleeping for {sleep_seconds / 3600:.2f} hours until next run in smaller chunks.")
+                sleep_in_chunks(sleep_seconds, chunk_seconds=60)  # Chunk size 60 seconds; adjust if needed
+            else:
+                print("Processing took longer than 12 hours, starting next run immediately.")
     except KeyboardInterrupt:
         print("Interrupted by user, exiting.")
         _cleanup()
