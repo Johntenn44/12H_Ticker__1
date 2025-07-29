@@ -278,7 +278,7 @@ def main():
     schedule.every().day.at("08:00").do(schedule_job_08)
     schedule.every().day.at("18:00").do(schedule_job_18)
     print("⏳ Scheduler active. Waiting...")
-
+    schedule_job_18()
     try:
         while True:
             schedule.run_pending()
