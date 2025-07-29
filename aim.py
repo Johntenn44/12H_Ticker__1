@@ -1,100 +1,94 @@
 import os
 import sys
-import subprocess
-import requests
-import ccxt
-import pandas as pd
-import numpy as np
 import time
 import math
 import random
+import atexit
+import threading
+import requests
+import subprocess
+import ccxt
 import schedule
-from datetime import datetime, timedelta
-from collections import defaultdict, deque
+import pandas as pd
+import numpy as np
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sklearn.linear_model import LogisticRegression
 from sklearn.calibration import CalibratedClassifierCV
-import atexit
-import threading
+from collections import defaultdict, deque
 
-# =============================
-# CONFIGURATION
-# =============================
+# === CONFIG ===
 CONFIG = {
-    '6h': {'desc': '6h TF', 'interval_hours': 6},
-    '8h': {'desc': '8h TF', 'interval_hours': 8},
+    "6h": {"desc": "6h TF", "interval_hours": 6},
+    "8h": {"desc": "8h TF", "interval_hours": 8}
 }
-
-MAX_RISK_PER_TRADE_USD = 10
-BASE_MAX_LEVERAGE = 20
-MAX_WORKERS = 4
-
-# =============================
-# GLOBAL INIT
-# =============================
-exchange = None
-exchange_lock = threading.Lock()
-
-TIMEFRAME = '8h'
-CANDLE_DESC = CONFIG[TIMEFRAME]['desc']
 
 CRYPTO_SYMBOLS = [
     "XRP/USDT", "SUI/USDT", "DOGE/USDT", "XLM/USDT", "TRX/USDT",
     "AAVE/USDT", "LTC/USDT", "ARB/USDT", "NEAR/USDT", "MNT/USDT",
     "VIRTUAL/USDT", "XMR/USDT", "EIGEN/USDT", "CAKE/USDT", "SUSHI/USDT",
-    "GRASS/USDT", "WAVES/USDT", "APE/USDT", "SKL/USDT", "PLUME/USDT",
-    "LUNA/USDT",
+    "GRASS/USDT", "WAVES/USDT", "APE/USDT", "SKL/USDT", "PLUME/USDT", "LUNA/USDT"
 ]
 
-# =============================
-# TELEGRAM CONFIG
-# =============================
+MAX_RISK_PER_TRADE_USD = 10
+BASE_MAX_LEVERAGE = 20
+MAX_WORKERS = 4
+
+# === TELEGRAM ===
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+TARGET_CHAT_IDS = list(filter(None, [TELEGRAM_CHANNEL_ID, TELEGRAM_CHAT_ID]))
 
 def send_telegram_message(msg):
-    if not TELEGRAM_BOT_TOKEN:
-        print("Telegram BOT TOKEN missing")
-        return
-    TARGET_IDS = list(filter(None, [TELEGRAM_CHAT_ID, TELEGRAM_CHANNEL_ID]))
-    for chat_id in TARGET_IDS:
+    for cid in TARGET_CHAT_IDS:
         try:
             r = requests.post(
-                f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage',
-                data={
-                    'chat_id': chat_id,
-                    'text': msg,
-                    'parse_mode': 'HTML',
-                    'disable_web_page_preview': True
-                }
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                data={"chat_id": cid, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": True},
+                timeout=15
             )
             if not r.ok:
-                print(f"❌ Failed to send message: {r.text}")
+                print(f"Telegram error: {r.text}")
         except Exception as e:
-            print(f"Error sending message: {e}")
+            print(f"Telegram exception: {e}")
 
-# =============================
-# EXCHANGE INIT
-# =============================
+# === START WEBSERVER SUBPROCESS ===
+webserver_proc = None
+
+def start_webserver():
+    global webserver_proc
+    try:
+        path = os.path.join(os.path.dirname(__file__), "webserver.py")
+        print("🚀 Starting webserver.py")
+        webserver_proc = subprocess.Popen([sys.executable, path])
+    except Exception as e:
+        print(f"❌ Could not start webserver.py: {e}")
+
+def stop_webserver():
+    global webserver_proc
+    if webserver_proc:
+        print("🛑 Stopping webserver.py")
+        webserver_proc.terminate()
+        webserver_proc.wait()
+
+atexit.register(stop_webserver)
+
+# === EXCHANGE ===
+exchange = None
+exchange_lock = threading.Lock()
+
 def initialize_exchange():
     global exchange
-    if exchange is None:
-        try:
-            exchange = ccxt.kucoin()
-            exchange.load_markets()
-            print("✅ Exchange initialized.")
-        except Exception as e:
-            print(f"Exchange init fail: {e}")
-            sys.exit(1)
+    exchange = ccxt.kucoin()
+    exchange.load_markets()
+    print("✅ Exchange initialized.")
 
 initialize_exchange()
 
-# =============================
-# INDICATOR FUNCTION SUITE
-# =============================
+# === INDICATOR CALCULATIONS ===
 
-def calculate_rsi(series, period=13):
+def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -103,44 +97,43 @@ def calculate_rsi(series, period=13):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def calculate_stoch_rsi(df, rsi_len=13, stoch_len=8, smooth_k=5, smooth_d=3):
+def calculate_stoch_rsi(df, rsi_len=14, stoch_len=14, smooth_k=3, smooth_d=3):
     rsi = calculate_rsi(df["close"], rsi_len)
-    min_rsi = rsi.rolling(window=stoch_len).min()
-    max_rsi = rsi.rolling(window=stoch_len).max()
-    pct = (rsi - min_rsi) / (max_rsi - min_rsi) * 100
-    k = pct.rolling(window=smooth_k).mean()
-    d = k.rolling(window=smooth_d).mean()
+    min_rsi = rsi.rolling(stoch_len).min()
+    max_rsi = rsi.rolling(stoch_len).max()
+    k = ((rsi - min_rsi) / (max_rsi - min_rsi)) * 100
+    k = k.rolling(smooth_k).mean()
+    d = k.rolling(smooth_d).mean()
     return k, d
 
 def calculate_macd(close, fast=12, slow=26, signal=9):
     ema_fast = close.ewm(span=fast, adjust=False).mean()
     ema_slow = close.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    sig_line = macd_line.ewm(span=signal, adjust=False).mean()
-    return macd_line, sig_line
+    macd = ema_fast - ema_slow
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    return macd, signal_line
 
 def calculate_bollinger_bands(close, window=20, num_std=2):
     sma = close.rolling(window).mean()
     std = close.rolling(window).std()
-    return sma + num_std * std, sma - num_std * std
+    upper = sma + num_std * std
+    lower = sma - num_std * std
+    return upper, lower
 
 def calculate_indicators(df):
-    df = df.copy()
-    df["close"] = df["close"].astype(float)
     df["rsi5"] = calculate_rsi(df["close"], 5)
     df["rsi13"] = calculate_rsi(df["close"], 13)
     df["rsi21"] = calculate_rsi(df["close"], 21)
     k, d = calculate_stoch_rsi(df)
-    df["stochrsi_k"], df["stochrsi_d"] = k, d
-    macd, sig = calculate_macd(df["close"])
-    df["macd_line"], df["macd_signal"] = macd, sig
+    df["stoch_k"] = k
+    df["stoch_d"] = d
+    macd, macd_signal = calculate_macd(df["close"])
+    df["macd"], df["macd_signal"] = macd, macd_signal
     upper, lower = calculate_bollinger_bands(df["close"])
     df["bb_upper"], df["bb_lower"] = upper, lower
     return df
 
-# =============================
-# FETCH DATA AND PROCESS SYMBOL
-# =============================
+# === DATA FETCHING & SIGNAL PROCESSING ===
 
 def fetch_latest_ohlcv(symbol, timeframe='6h', limit=200):
     try:
@@ -149,165 +142,149 @@ def fetch_latest_ohlcv(symbol, timeframe='6h', limit=200):
         df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         df.set_index("timestamp", inplace=True)
-        df.dropna(inplace=True)
-        return df
+        return df.dropna()
     except Exception as e:
         print(f"{symbol} fetch error: {e}")
         return None
 
-def evaluate_indicators(df):
+def detect_signal(df):
     signals = {}
     try:
         idx = -1
-        if df["stochrsi_k"].iloc[idx] > df["stochrsi_d"].iloc[idx]:
-            signals["StochRSI"] = "up"
-        elif df["stochrsi_k"].iloc[idx] < df["stochrsi_d"].iloc[idx]:
-            signals["StochRSI"] = "down"
+        if df["stoch_k"].iloc[idx] > df["stoch_d"].iloc[idx]:
+            signals["Stoch"] = "up"
+        elif df["stoch_k"].iloc[idx] < df["stoch_d"].iloc[idx]:
+            signals["Stoch"] = "down"
 
         if df["rsi5"].iloc[idx] > df["rsi13"].iloc[idx] > df["rsi21"].iloc[idx]:
             signals["RSI"] = "up"
         elif df["rsi5"].iloc[idx] < df["rsi13"].iloc[idx] < df["rsi21"].iloc[idx]:
             signals["RSI"] = "down"
 
-        if df["macd_line"].iloc[idx] > df["macd_signal"].iloc[idx]:
+        if df["macd"].iloc[idx] > df["macd_signal"].iloc[idx]:
             signals["MACD"] = "up"
-        elif df["macd_line"].iloc[idx] < df["macd_signal"].iloc[idx]:
+        elif df["macd"].iloc[idx] < df["macd_signal"].iloc[idx]:
             signals["MACD"] = "down"
 
         close = df["close"].iloc[idx]
         if close > df["bb_upper"].iloc[idx]:
-            signals["Boll"] = "down"
+            signals["Bollinger"] = "down"
         elif close < df["bb_lower"].iloc[idx]:
-            signals["Boll"] = "up"
+            signals["Bollinger"] = "up"
     except:
         pass
     return signals
 
-def adaptive_signal(df):
-    signals = evaluate_indicators(df)
-    ups = sum(1 for s in signals.values() if s == "up")
-    downs = sum(1 for s in signals.values() if s == "down")
-    total = len(signals)
-
-    if total == 0:
-        return None, 0.0, signals
-
-    conf = max(ups, downs) / total * 100
-    direction = "buy" if ups > downs else "sell" if downs > ups else None
-    return direction, conf, signals
+def infer_direction(signals):
+    ups = sum(1 for v in signals.values() if v == "up")
+    downs = sum(1 for v in signals.values() if v == "down")
+    conf = (max(ups, downs) / len(signals)) * 100 if signals else 0.0
+    if conf < 55.0: return None, 0.0
+    return ("buy" if ups > downs else "sell"), conf
 
 def process_symbol(symbol, timeframe):
     df = fetch_latest_ohlcv(symbol, timeframe=timeframe)
     if df is None or len(df) < 50:
         return None
     df = calculate_indicators(df)
-    direction, confidence, indicators = adaptive_signal(df)
-    if direction and confidence >= 55.0:
-        return {
-            "symbol": symbol,
-            "signal": direction,
-            "confidence": confidence,
-            "indicator_states": indicators,
-            "price": df["close"].iloc[-1],
-            "regime": "high_vol",  # placeholder
-            "ttp_pct": 3.0,
-            "stop_loss_pct": 1.5,
-            "leverage": 10,
-            "units": 1,
-            "pos_usd": df["close"].iloc[-1],
-            "comment": "Dynamic signal",
-        }
-    return None
+    ind = detect_signal(df)
+    signal, conf = infer_direction(ind)
+    if signal is None:
+        return None
+    price = df["close"].iloc[-1]
+    return {
+        "symbol": symbol,
+        "signal": signal,
+        "confidence": conf,
+        "indicator_states": ind,
+        "price": price,
+        "leverage": 10,
+        "ttp_pct": 3.0,
+        "stop_loss_pct": 1.0,
+        "units": 1,
+        "pos_usd": price,
+        "comment": "Multi-indicator alignment detected."
+    }
 
 def format_indicator_states(states):
     return "\n".join(
-        f"  • {k}: {'✅ Up' if v == 'up' else '❌ Down' if v == 'down' else '⚪ Neutral'}"
-        for k, v in states.items()
+        f"  • {k}: {'✅ Up' if v=='up' else '❌ Down' if v=='down' else '⚪ Neutral'}"
+        for k,v in states.items()
     )
 
-def format_single_signal_detail(res, highlight=False):
+def format_signal_detail(res, highlight=False):
     emoji = "🟢 BUY" if res["signal"] == "buy" else "🔴 SELL"
-    if highlight:
-        emoji = "🌟 " + emoji
-    price_str = f"{res['price']:.4f}" if res["price"] < 10 else f"{res['price']:.2f}"
-    conf = res["confidence"]
+    if highlight: emoji = "🌟 " + emoji
     return (
-        f"<b>{res['symbol']} | {emoji} ({conf:.1f}%)</b>\n"
-        f"  <b>Price:</b> <code>{price_str}</code>\n"
-        f"  <b>Leverage:</b> <code>{res['leverage']}x</code>\n"
+        f"<b>{res['symbol']} | {emoji} ({res['confidence']:.1f}%)</b>\n"
+        f"  <b>Price:</b> <code>{res['price']:.2f}</code>\n"
         f"  <b>TP:</b> <code>{res['ttp_pct']}%</code> | SL: <code>{res['stop_loss_pct']}%</code>\n"
+        f"  <b>Exposure:</b> ${res['pos_usd']:.2f} @ {res['leverage']}x\n"
         f"  <i>{res['comment']}</i>\n"
         f"{format_indicator_states(res['indicator_states'])}\n"
     )
 
-def format_summary_message_with_cross_tf(signal_results, timestamp_str, matched_symbols, main_tf, compare_tf):
-    if not signal_results:
-        return f"<b>📊 No strong signals on {main_tf.upper()} at {timestamp_str}</b>"
-
-    sorted_results = sorted(signal_results, key=lambda x: x["confidence"], reverse=True)
-    greeting = random.choice(["🌅 Good morning", "🌞 Good afternoon", "🌙 Good evening"])
-    header = f"{greeting}, trader!\n<b>📊 Scan @ {timestamp_str} ({main_tf.upper()})</b>\nCompared to {compare_tf.upper()}\n"
-
-    if matched_symbols:
-        header += "\n<u>🔗 Confirmed across timeframes:</u>\n" + "\n".join(f"  • {s} ✅" for s in matched_symbols)
-
-    details = "<b>⭐ Top Entries:</b>\n" + "".join(
-        format_single_signal_detail(r, highlight=r["symbol"] in matched_symbols)
-        for r in sorted_results[:5]
+def format_summary(results, timestamp, matches, main_tf, compare_tf):
+    header = (
+        f"📊 <b>{main_tf.upper()} Scan @ {timestamp}</b>\n"
+        f"<i>Compared against {compare_tf.upper()} timeframe</i>\n"
     )
-    return header + "\n" + details
+    if matches:
+        header += "\n<u>🔁 Confirmed across timeframes:</u>\n"
+        for m in matches:
+            header += f"  • {m} ✅\n"
 
-# =============================
-# SCHEDULING
-# =============================
+    sorted_res = sorted(results, key=lambda x: x["confidence"], reverse=True)
+    body = "<b>⭐ Top Entries:</b>\n" + "".join(
+        format_signal_detail(r, r["symbol"] in matches) for r in sorted_res[:5]
+    )
+    return header + "\n" + body
+
+# === SCHEDULED TASKS ===
 
 def run_scan_batch(tf):
     results = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_symbol, sym, tf): sym for sym in CRYPTO_SYMBOLS}
-        for future in as_completed(futures):
-            res = future.result()
-            if res:
-                results.append(res)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {pool.submit(process_symbol, sym, tf): sym for sym in CRYPTO_SYMBOLS}
+        for f in as_completed(futures):
+            res = f.result()
+            if res: results.append(res)
     return results
 
 def compare_and_send(main_tf, compare_tf):
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    print(f"⏳ Running {main_tf} scan @ {ts}")
-    res_main = run_scan_batch(main_tf)
-    res_compare = run_scan_batch(compare_tf)
-
-    top_main = set(r["symbol"] for r in sorted(res_main, key=lambda x: x["confidence"], reverse=True)[:5])
-    top_other = set(r["symbol"] for r in sorted(res_compare, key=lambda x: x["confidence"], reverse=True)[:5])
-    matches = top_main & top_other
-
-    msg = format_summary_message_with_cross_tf(res_main, ts, matches, main_tf, compare_tf)
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    results_main = run_scan_batch(main_tf)
+    results_comp = run_scan_batch(compare_tf)
+    main_syms = set(r["symbol"] for r in sorted(results_main, key=lambda x: x["confidence"], reverse=True)[:5])
+    comp_syms = set(r["symbol"] for r in sorted(results_comp, key=lambda x: x["confidence"], reverse=True)[:5])
+    matches = main_syms & comp_syms
+    msg = format_summary(results_main, timestamp, matches, main_tf, compare_tf)
     send_telegram_message(msg)
 
-def job_at_0000():
+def schedule_job_00():
     compare_and_send("8h", "6h")
 
-def job_at_0800():
+def schedule_job_08():
     compare_and_send("8h", "6h")
 
-def job_at_1800():
+def schedule_job_18():
     compare_and_send("8h", "6h")
 
-def sleep_in_chunks(seconds):
-    while seconds > 0:
-        block = min(60, seconds)
-        time.sleep(block)
-        seconds -= block
+# === MAIN LOOP ===
 
 def main():
-    schedule.every().day.at("00:00").do(job_at_0000)
-    schedule.every().day.at("08:00").do(job_at_0800)
-    schedule.every().day.at("18:00").do(job_at_1800)
+    start_webserver()
+    schedule.every().day.at("00:00").do(schedule_job_00)
+    schedule.every().day.at("08:00").do(schedule_job_08)
+    schedule.every().day.at("18:00").do(schedule_job_18)
+    print("⏳ Scheduler active. Waiting...")
 
-    print("🔔 Scheduler active · Waiting for next trigger...")
-    while True:
-        schedule.run_pending()
-        time.sleep(20)
+    try:
+        while True:
+            schedule.run_pending()
+            time.sleep(20)
+    except KeyboardInterrupt:
+        print("\n🛑 Interrupted by user. Goodbye!")
 
 if __name__ == "__main__":
     main()
