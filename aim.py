@@ -232,11 +232,15 @@ INDICATOR_FUNCTIONS = {
 }
 
 # =============================
-# Performance and ML State
+# Performance and ML State: Track full combos and single-indicator signals separately
 # =============================
 
-# Performance tracker: timeframe → period → regime → combo → (correct, total)
 performance_tracker = {
+    tf: {p: {"high_vol": {}, "low_vol": {}, "unknown": {}} for p in BACKTEST_PERIODS.keys()}
+    for tf in CONFIG.keys()
+}
+
+single_perf_tracker = {
     tf: {p: {"high_vol": {}, "low_vol": {}, "unknown": {}} for p in BACKTEST_PERIODS.keys()}
     for tf in CONFIG.keys()
 }
@@ -249,38 +253,40 @@ calibrated_ml_model = None
 ml_trained = False
 ml_lock = threading.Lock()
 
-
+# Market regime detection
 def _market_regime(df, window=50, threshold=0.02):
     if len(df) < window:
         return "unknown"
     vol = df["close"].pct_change().rolling(window).std().iloc[-1]
     return "high_vol" if vol > threshold else "low_vol"
 
-
-def _update_indicator_performance(timeframe, period_label, name_combo, regime, correct):
+# Update combo performance
+def _update_indicator_performance(timeframe, period_label, combo_key, regime, correct):
     if regime == "unknown":
         return
-    perf = performance_tracker.get(timeframe, {}).get(period_label, {}).get(regime, {})
-    if name_combo not in perf:
-        perf[name_combo] = [0, 0]
-    perf[name_combo][1] += 1  # total count
+    perf = performance_tracker[timeframe][period_label][regime]
+    if combo_key not in perf:
+        perf[combo_key] = [0, 0]  # [correct, total]
+    perf[combo_key][1] += 1
     if correct:
-        perf[name_combo][0] += 1  # correct count
+        perf[combo_key][0] += 1
 
-
-def _get_indicator_weight(timeframe, period_label, name_combo, regime):
-    perf = performance_tracker.get(timeframe, {}).get(period_label, {}).get(regime, {})
-    if name_combo not in perf:
-        return 0.5
-    correct, total = perf[name_combo]
-    return (correct / total) if total > 0 else 0.5
-
+# Update single indicator signal performance
+def _update_single_indicator_performance(timeframe, period_label, ind_name, ind_signal, regime, correct):
+    if regime == "unknown":
+        return
+    perf = single_perf_tracker[timeframe][period_label][regime]
+    key = (ind_name, ind_signal)
+    if key not in perf:
+        perf[key] = [0, 0]
+    perf[key][1] += 1
+    if correct:
+        perf[key][0] += 1
 
 def _add_ml_sample(signals, price_move):
     feats = [(1 if s == "up" else -1 if s == "down" else 0) for s in signals.values()]
     ml_X.append(feats)
     ml_y.append(1 if price_move > 0 else 0)
-
 
 def _train_ml_model():
     global ml_trained, calibrated_ml_model
@@ -300,7 +306,6 @@ def _train_ml_model():
             ml_trained = False
             calibrated_ml_model = None
 
-
 def _ml_predict(signals):
     if not ml_trained or calibrated_ml_model is None:
         return None, 0.0
@@ -316,73 +321,97 @@ def _ml_predict(signals):
         print(f"ML prediction error: {e}")
         return None, 0.0
 
+# Get performance weight for full combo (used for rating)
+def _get_combo_performance_weight(timeframe, period_label, combo_key, regime):
+    perf = performance_tracker.get(timeframe, {}).get(period_label, {}).get(regime, {})
+    if combo_key not in perf:
+        return None
+    correct, total = perf[combo_key]
+    if total < 10:  # minimum samples for trust
+        return None
+    return correct / total
 
+# Get performance weight for single indicator signal (used in adaptive voting)
+def _get_single_perf_weight(timeframe, period_label, ind_key, regime):
+    perf = single_perf_tracker.get(timeframe, {}).get(period_label, {}).get(regime, {})
+    if ind_key not in perf:
+        return None
+    correct, total = perf[ind_key]
+    if total < 10:  # minimum samples for trust
+        return None
+    return correct / total
+
+# Adaptive signal with weighting from single_perf_tracker and ML
 def adaptive_signal(df, timeframe):
     regime = _market_regime(df)
     signals = {n: fn(df, -1) for n, fn in INDICATOR_FUNCTIONS.items()}
-    # Compose combo key for current signals
     combo = tuple(sorted((k, v) for k, v in signals.items() if v is not None))
-    # Multi-period weighted average indicator weight
-    weights = []
-    weights_count = 0
-    for period_label in BACKTEST_PERIODS.keys():
-        w = 1.0 / (BACKTEST_PERIODS[period_label])  # more weight for more recent?
-        weights_count += w
-        weights.append((period_label, w))
-    def weighted_perf(name_combo):
-        weighted_sum = 0
-        total_w = 0
-        for period_label, w in weights:
-            p = _get_indicator_weight(timeframe, period_label, name_combo, regime)
-            weighted_sum += w * p
+
+    # Compute weighted average combo performance rating
+    weighted_combo_perf = []
+    total_w = 0
+    for period_label, period_months in BACKTEST_PERIODS.items():
+        w = 1.0 / period_months
+        weight_val = _get_combo_performance_weight(timeframe, period_label, combo, regime)
+        if weight_val is not None:
+            weighted_combo_perf.append(w * weight_val)
             total_w += w
-        return weighted_sum / total_w if total_w else 0.5
-    weight_combo = weighted_perf(combo)
+    weight_combo = (sum(weighted_combo_perf) / total_w) if total_w > 0 else 0.5
 
     ml_sig, ml_conf = _ml_predict(signals)
     if ml_sig:
         return ml_sig, ml_conf, signals, regime, weight_combo
 
-    up_w = down_w = total = 0
+    # Adaptive voting weighted by single indicator performance
+    up_w = 0
+    down_w = 0
+    total = 0
     for n, s in signals.items():
-        w = 0.0
-        # Average performance of the indicator's current signal across periods & regime
-        w += weighted_perf(((n, s),))
-        if s == "up":
-            up_w += w
-            total += w
-        elif s == "down":
-            down_w += w
-            total += w
+        ind_key = (n, s)
+        weight_votes = []
+        total_ind_w = 0
+        for period_label, period_months in BACKTEST_PERIODS.items():
+            w = 1.0 / period_months
+            perf_weight = _get_single_perf_weight(timeframe, period_label, ind_key, regime)
+            if perf_weight is not None:
+                weight_votes.append(w * perf_weight)
+                total_ind_w += w
+        weight_indicator = (sum(weight_votes) / total_ind_w) if total_ind_w > 0 else 0.5
+
+        if s == 'up':
+            up_w += weight_indicator
+            total += weight_indicator
+        elif s == 'down':
+            down_w += weight_indicator
+            total += weight_indicator
+
     if total > 0.1:
         if up_w > down_w * 1.2:
             return "buy", (up_w / total) * 100, signals, regime, weight_combo
         if down_w > up_w * 1.2:
             return "sell", (down_w / total) * 100, signals, regime, weight_combo
+
     if all(s == "up" for s in signals.values() if s is not None):
         avg_conf = weight_combo * 100
         return "buy", avg_conf, signals, regime, weight_combo
     if all(s == "down" for s in signals.values() if s is not None):
         avg_conf = weight_combo * 100
         return "sell", avg_conf, signals, regime, weight_combo
+
     return None, 0.0, signals, regime, weight_combo
 
-
+# Backtesting update for combos and single indicators
 def backtest_update_multi_period(df, timeframe):
-    now = datetime.utcnow()
     for period_label, months in BACKTEST_PERIODS.items():
         bars_needed = months * CONFIG[timeframe]['bars_per_month']
         if len(df) < bars_needed + 2:
             continue
         sub_df = df.tail(bars_needed + 2)
         regime = _market_regime(sub_df)
-
         for i in range(50, len(sub_df) - 1):
             sigs = {n: fn(sub_df, i) for n, fn in INDICATOR_FUNCTIONS.items()}
-            combo = tuple(sorted((k, v) for k, v in sigs.items() if v is not None))
+            combo_key = tuple(sorted((k, v) for k, v in sigs.items() if v is not None))
             p0, p1 = sub_df["close"].iloc[i], sub_df["close"].iloc[i + 1]
-
-            # Determine correctness: If signals are predominantly 'up', expect price increase and vice versa
             ups = sum(1 for v in sigs.values() if v == "up")
             downs = sum(1 for v in sigs.values() if v == "down")
             correct = None
@@ -390,11 +419,16 @@ def backtest_update_multi_period(df, timeframe):
                 correct = p1 > p0
             elif downs > ups:
                 correct = p1 < p0
-
             if correct is None:
                 continue
-            _update_indicator_performance(timeframe, period_label, combo, regime, correct)
-            _add_ml_sample(sigs, p1-p0)
+
+            # Update full combo performance
+            _update_indicator_performance(timeframe, period_label, combo_key, regime, correct)
+            # Update individual indicators performance
+            for ind_name, ind_sig in sigs.items():
+                if ind_sig is not None:
+                    _update_single_indicator_performance(timeframe, period_label, ind_name, ind_sig, regime, correct)
+            _add_ml_sample(sigs, p1 - p0)
     _train_ml_model()
 
 # =============================
@@ -442,7 +476,6 @@ def process_symbol(symbol, timeframe):
     elif regime == "low_vol":
         leverage = int(BASE_MAX_LEVERAGE * 1.0)
 
-    # Static example trailing TP and SL, can be made dynamic based on regime or rating here
     ttp = 3.0 * (1 + rating/100 * 0.5)
     sl = 1.0 * (1 - rating/150)
 
@@ -485,14 +518,17 @@ def process_symbol(symbol, timeframe):
 # Telegram message formatting
 # =============================
 def format_indicator_states(states):
-    return "\n".join(f"  • {name}: {'✅ Up' if s == 'up' else '❌ Down' if s == 'down' else '⚪ Neutral'}"
-                     for name, s in states.items())
+    lines = []
+    for name, s in states.items():
+        symbol = '✅ Up' if s == 'up' else '❌ Down' if s == 'down' else '⚪ Neutral'
+        lines.append(f"  • {name}: {symbol}")
+    return "\n".join(lines)
 
 def format_single_signal_detail(res, highlight=False):
     emoji = "🟢 BUY" if res["signal"] == "buy" else "🔴 SELL"
     if highlight:
         emoji = "🌟 " + emoji
-    rating_str = f"• <b>Perf Rating:</b> <code>{res['rating']:.1f}%</code>\n" if "rating" in res and res["rating"] else ""
+    rating_str = f"• <b>Perf Rating:</b> <code>{res['rating']:.1f}%</code>\n" if res.get("rating") else ""
     return (
         f"<b>{res['symbol']} | {emoji} ({res['confidence']:.1f}%)</b>\n"
         f"  <b>Price:</b> <code>{res['price']:.4f}</code>\n"
@@ -520,7 +556,7 @@ def format_summary_message_with_cross_tf(signal_results, timestamp_str, matched_
     )
     if matched_symbols:
         header += f"\n<u>🔗 Dual-Timeframe Matches ({len(matched_symbols)}):</u>\n"
-        for sym in matched_symbols:
+        for sym in sorted(matched_symbols):
             header += f"  • {sym} ✅\n"
 
     details = "<b>⭐ Top Signals:</b>\n" + "".join(
@@ -577,7 +613,9 @@ def main():
     schedule.every().day.at("18:00").do(job_1800)
 
     print("⏳ Scheduler started. Waiting for scheduled scans at 00:00, 08:00, and 18:00 UTC.")
-    job_0800()
+
+    # Optional: Run a scan immediately on start, comment if undesired
+    job_0000()
 
     try:
         while True:
