@@ -577,6 +577,7 @@ def main():
     schedule.every().day.at("18:00").do(job_1800)
 
     print("⏳ Scheduler started. Waiting for scheduled scans at 00:00, 08:00, and 18:00 UTC.")
+    job_0800()
 
     try:
         while True:
