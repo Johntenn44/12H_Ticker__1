@@ -1,94 +1,125 @@
 import os
 import sys
+import subprocess
 import time
 import math
 import random
 import atexit
 import threading
 import requests
-import subprocess
 import ccxt
-import schedule
 import pandas as pd
 import numpy as np
+import schedule
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict, deque
 from sklearn.linear_model import LogisticRegression
 from sklearn.calibration import CalibratedClassifierCV
-from collections import defaultdict, deque
 
-# === CONFIG ===
+# =============================
+# Configuration and Constants
+# =============================
+
 CONFIG = {
-    "6h": {"desc": "6h TF", "interval_hours": 6},
-    "8h": {"desc": "8h TF", "interval_hours": 8}
+    '6h': {'desc': '6h TF', 'interval_hours': 6, 'bars_per_month': 120},
+    '8h': {'desc': '8h TF', 'interval_hours': 8, 'bars_per_month': 90},
 }
+
+BACKTEST_PERIODS = {
+    '1m': 1,
+    '2m': 2,
+    '3m': 3,
+    '5m': 5,
+}
+
+MAX_WORKERS = 4
+MAX_RISK_PER_TRADE_USD = 10
+BASE_MAX_LEVERAGE = 20
 
 CRYPTO_SYMBOLS = [
     "XRP/USDT", "SUI/USDT", "DOGE/USDT", "XLM/USDT", "TRX/USDT",
     "AAVE/USDT", "LTC/USDT", "ARB/USDT", "NEAR/USDT", "MNT/USDT",
     "VIRTUAL/USDT", "XMR/USDT", "EIGEN/USDT", "CAKE/USDT", "SUSHI/USDT",
-    "GRASS/USDT", "WAVES/USDT", "APE/USDT", "SKL/USDT", "PLUME/USDT", "LUNA/USDT"
+    "GRASS/USDT", "WAVES/USDT", "APE/USDT", "SKL/USDT", "PLUME/USDT",
+    "LUNA/USDT"
 ]
 
-MAX_RISK_PER_TRADE_USD = 10
-BASE_MAX_LEVERAGE = 20
-MAX_WORKERS = 4
-
-# === TELEGRAM ===
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 TARGET_CHAT_IDS = list(filter(None, [TELEGRAM_CHANNEL_ID, TELEGRAM_CHAT_ID]))
 
-def send_telegram_message(msg):
-    for cid in TARGET_CHAT_IDS:
-        try:
-            r = requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                data={"chat_id": cid, "text": msg, "parse_mode": "HTML", "disable_web_page_preview": True},
-                timeout=15
-            )
-            if not r.ok:
-                print(f"Telegram error: {r.text}")
-        except Exception as e:
-            print(f"Telegram exception: {e}")
-
-# === START WEBSERVER SUBPROCESS ===
+# =============================
+# Webserver subprocess management
+# =============================
 webserver_proc = None
 
 def start_webserver():
     global webserver_proc
     try:
-        path = os.path.join(os.path.dirname(__file__), "webserver.py")
-        print("🚀 Starting webserver.py")
-        webserver_proc = subprocess.Popen([sys.executable, path])
+        webserver_path = os.path.join(os.path.dirname(__file__), 'webserver.py')
+        print("▶️ Starting webserver subprocess...")
+        webserver_proc = subprocess.Popen([sys.executable, webserver_path])
     except Exception as e:
-        print(f"❌ Could not start webserver.py: {e}")
+        print(f"⚠️ Could not start webserver.py: {e}")
 
 def stop_webserver():
     global webserver_proc
     if webserver_proc:
-        print("🛑 Stopping webserver.py")
+        print("🛑 Terminating webserver subprocess...")
         webserver_proc.terminate()
         webserver_proc.wait()
 
 atexit.register(stop_webserver)
 
-# === EXCHANGE ===
+# =============================
+# Exchange Initialization
+# =============================
 exchange = None
 exchange_lock = threading.Lock()
 
 def initialize_exchange():
     global exchange
-    exchange = ccxt.kucoin()
-    exchange.load_markets()
-    print("✅ Exchange initialized.")
+    if exchange is None:
+        try:
+            exchange = ccxt.kucoin()
+            exchange.load_markets()
+            print("✅ Exchange initialized.")
+        except Exception as e:
+            print(f"❌ Exchange initialization failed: {e}")
+            sys.exit(1)
 
 initialize_exchange()
 
-# === INDICATOR CALCULATIONS ===
+# =============================
+# Telegram Messaging
+# =============================
+def send_telegram_message(msg):
+    if not TELEGRAM_BOT_TOKEN:
+        print("❌ Telegram BOT TOKEN missing.")
+        return
+    for chat_id in TARGET_CHAT_IDS:
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                data={
+                    "chat_id": chat_id,
+                    "text": msg,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
+                timeout=15,
+            )
+            if not r.ok:
+                print(f"Telegram API error: {r.text}")
+        except Exception as e:
+            print(f"Telegram message send exception: {e}")
 
-def calculate_rsi(series, period=14):
+# =============================
+# Indicator Calculations
+# =============================
+def calculate_rsi(series, period=13):
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -97,194 +128,462 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def calculate_stoch_rsi(df, rsi_len=14, stoch_len=14, smooth_k=3, smooth_d=3):
+def calculate_stoch_rsi(df, rsi_len=13, stoch_len=8, smooth_k=5, smooth_d=3):
     rsi = calculate_rsi(df["close"], rsi_len)
-    min_rsi = rsi.rolling(stoch_len).min()
-    max_rsi = rsi.rolling(stoch_len).max()
-    k = ((rsi - min_rsi) / (max_rsi - min_rsi)) * 100
-    k = k.rolling(smooth_k).mean()
-    d = k.rolling(smooth_d).mean()
+    min_rsi = rsi.rolling(window=stoch_len).min()
+    max_rsi = rsi.rolling(window=stoch_len).max()
+    pct = (rsi - min_rsi) / (max_rsi - min_rsi) * 100
+    pct = pct.fillna(method="ffill")
+    k = pct.rolling(window=smooth_k).mean()
+    d = k.rolling(window=smooth_d).mean()
     return k, d
+
+def calculate_multi_wr(df, lengths=(3, 8, 13, 55, 144, 233)):
+    wr = {}
+    for L in lengths:
+        hh = df["high"].rolling(L).max()
+        ll = df["low"].rolling(L).min()
+        wr_val = (hh - df["close"]) / (hh - ll)
+        wr_val = wr_val.replace([np.inf, -np.inf], np.nan).fillna(method="ffill")
+        wr[L] = (wr_val * -100).fillna(method="ffill")
+    return wr
+
+def calculate_kdj(df, length=5, ma1=8, ma2=8):
+    if len(df) < length:
+        nan_series = pd.Series(np.nan, index=df.index)
+        return nan_series, nan_series, nan_series
+    low_min = df["low"].rolling(length, min_periods=1).min()
+    high_max = df["high"].rolling(length, min_periods=1).max()
+    denom = (high_max - low_min).replace(0, np.nan)
+    rsv_raw = (df["close"] - low_min) / denom * 100
+    rsv = rsv_raw.copy().fillna(method="ffill").fillna(50)
+    k = rsv.ewm(span=ma1, adjust=False).mean()
+    d = k.ewm(span=ma2, adjust=False).mean()
+    j = 3 * k - 2 * d
+    return k, d, j
 
 def calculate_macd(close, fast=12, slow=26, signal=9):
     ema_fast = close.ewm(span=fast, adjust=False).mean()
     ema_slow = close.ewm(span=slow, adjust=False).mean()
-    macd = ema_fast - ema_slow
-    signal_line = macd.ewm(span=signal, adjust=False).mean()
-    return macd, signal_line
+    macd_line = ema_fast - ema_slow
+    sig_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line, sig_line
 
 def calculate_bollinger_bands(close, window=20, num_std=2):
     sma = close.rolling(window).mean()
     std = close.rolling(window).std()
-    upper = sma + num_std * std
-    lower = sma - num_std * std
-    return upper, lower
+    return sma + num_std * std, sma - num_std * std
 
 def calculate_indicators(df):
+    df = df.copy()
+    df["close"] = df["close"].astype(float)
     df["rsi5"] = calculate_rsi(df["close"], 5)
     df["rsi13"] = calculate_rsi(df["close"], 13)
     df["rsi21"] = calculate_rsi(df["close"], 21)
     k, d = calculate_stoch_rsi(df)
-    df["stoch_k"] = k
-    df["stoch_d"] = d
-    macd, macd_signal = calculate_macd(df["close"])
-    df["macd"], df["macd_signal"] = macd, macd_signal
-    upper, lower = calculate_bollinger_bands(df["close"])
-    df["bb_upper"], df["bb_lower"] = upper, lower
+    df["stochrsi_k"], df["stochrsi_d"] = k, d
+    wrs = calculate_multi_wr(df)
+    for L, series in wrs.items():
+        df[f"wr_{L}"] = series
+    kdj_k, kdj_d, kdj_j = calculate_kdj(df)
+    df["kdj_k"], df["kdj_d"], df["kdj_j"] = kdj_k, kdj_d, kdj_j
+    macd_line, macd_signal = calculate_macd(df["close"])
+    df["macd_line"], df["macd_signal"] = macd_line, macd_signal
+    bb_upper, bb_lower = calculate_bollinger_bands(df["close"])
+    df["bb_upper"], df["bb_lower"] = bb_upper, bb_lower
     return df
 
-# === DATA FETCHING & SIGNAL PROCESSING ===
+# =============================
+# Indicator signal interpretation
+# =============================
+def _trend(series1, series2, idx):
+    if idx < 1 or pd.isna(series1.iloc[idx]) or pd.isna(series2.iloc[idx]):
+        return None
+    if series1.iloc[idx] > series2.iloc[idx]:
+        return "up"
+    if series1.iloc[idx] < series2.iloc[idx]:
+        return "down"
+    return None
 
-def fetch_latest_ohlcv(symbol, timeframe='6h', limit=200):
+def _wr_position(wr_dict, idx):
+    try:
+        w3, w8, w55, w144, w233 = (wr_dict[x].iloc[idx] for x in (3, 8, 55, 144, 233))
+    except Exception:
+        return None
+    if w8 > w233 and w3 > w233 and w3 > w144 and w8 > w144:
+        return "up"
+    if w8 < w55 and w3 < w55:
+        return "down"
+    return None
+
+INDICATOR_FUNCTIONS = {
+    "Stoch RSI": lambda df, i: _trend(df["stochrsi_k"], df["stochrsi_d"], i),
+    "Williams %R": lambda df, i: _wr_position({L: df[f"wr_{L}"] for L in (3, 8, 55, 144, 233)}, i),
+    "RSI": lambda df, i: (
+        "up" if df["rsi5"].iloc[i] > df["rsi13"].iloc[i] > df["rsi21"].iloc[i]
+        else "down" if df["rsi5"].iloc[i] < df["rsi13"].iloc[i] < df["rsi21"].iloc[i]
+        else None),
+    "KDJ": lambda df, i: _trend(df["kdj_j"], df["kdj_d"], i),
+    "MACD": lambda df, i: _trend(df["macd_line"], df["macd_signal"], i),
+    "Bollinger": lambda df, i: (
+        "up" if df["close"].iloc[i] < df["bb_lower"].iloc[i]
+        else "down" if df["close"].iloc[i] > df["bb_upper"].iloc[i]
+        else None),
+}
+
+# =============================
+# Performance and ML State
+# =============================
+
+# Performance tracker: timeframe → period → regime → combo → (correct, total)
+performance_tracker = {
+    tf: {p: {"high_vol": {}, "low_vol": {}, "unknown": {}} for p in BACKTEST_PERIODS.keys()}
+    for tf in CONFIG.keys()
+}
+
+ml_X = deque(maxlen=1000)
+ml_y = deque(maxlen=1000)
+
+base_ml_model = LogisticRegression(solver="liblinear", random_state=42)
+calibrated_ml_model = None
+ml_trained = False
+ml_lock = threading.Lock()
+
+
+def _market_regime(df, window=50, threshold=0.02):
+    if len(df) < window:
+        return "unknown"
+    vol = df["close"].pct_change().rolling(window).std().iloc[-1]
+    return "high_vol" if vol > threshold else "low_vol"
+
+
+def _update_indicator_performance(timeframe, period_label, name_combo, regime, correct):
+    if regime == "unknown":
+        return
+    perf = performance_tracker.get(timeframe, {}).get(period_label, {}).get(regime, {})
+    if name_combo not in perf:
+        perf[name_combo] = [0, 0]
+    perf[name_combo][1] += 1  # total count
+    if correct:
+        perf[name_combo][0] += 1  # correct count
+
+
+def _get_indicator_weight(timeframe, period_label, name_combo, regime):
+    perf = performance_tracker.get(timeframe, {}).get(period_label, {}).get(regime, {})
+    if name_combo not in perf:
+        return 0.5
+    correct, total = perf[name_combo]
+    return (correct / total) if total > 0 else 0.5
+
+
+def _add_ml_sample(signals, price_move):
+    feats = [(1 if s == "up" else -1 if s == "down" else 0) for s in signals.values()]
+    ml_X.append(feats)
+    ml_y.append(1 if price_move > 0 else 0)
+
+
+def _train_ml_model():
+    global ml_trained, calibrated_ml_model
+    with ml_lock:
+        if len(ml_X) > len(INDICATOR_FUNCTIONS) * 5:
+            try:
+                base_ml_model.fit(np.array(ml_X), np.array(ml_y))
+                calibrated_ml_model = CalibratedClassifierCV(base_ml_model, cv="prefit", method="sigmoid")
+                calibrated_ml_model.fit(np.array(ml_X), np.array(ml_y))
+                ml_trained = True
+                print("🧠 ML model trained and calibrated.")
+            except Exception as e:
+                print(f"ML training failed: {e}")
+                ml_trained = False
+                calibrated_ml_model = None
+        else:
+            ml_trained = False
+            calibrated_ml_model = None
+
+
+def _ml_predict(signals):
+    if not ml_trained or calibrated_ml_model is None:
+        return None, 0.0
+    feats = np.array([(1 if s == "up" else -1 if s == "down" else 0)
+                      for s in signals.values()]).reshape(1, -1)
+    try:
+        proba = calibrated_ml_model.predict_proba(feats)[0]
+        max_proba = max(proba)
+        if max_proba < 0.55:
+            return None, 0.0
+        return ("buy", proba[1] * 100) if proba[1] > proba[0] else ("sell", proba[0] * 100)
+    except Exception as e:
+        print(f"ML prediction error: {e}")
+        return None, 0.0
+
+
+def adaptive_signal(df, timeframe):
+    regime = _market_regime(df)
+    signals = {n: fn(df, -1) for n, fn in INDICATOR_FUNCTIONS.items()}
+    # Compose combo key for current signals
+    combo = tuple(sorted((k, v) for k, v in signals.items() if v is not None))
+    # Multi-period weighted average indicator weight
+    weights = []
+    weights_count = 0
+    for period_label in BACKTEST_PERIODS.keys():
+        w = 1.0 / (BACKTEST_PERIODS[period_label])  # more weight for more recent?
+        weights_count += w
+        weights.append((period_label, w))
+    def weighted_perf(name_combo):
+        weighted_sum = 0
+        total_w = 0
+        for period_label, w in weights:
+            p = _get_indicator_weight(timeframe, period_label, name_combo, regime)
+            weighted_sum += w * p
+            total_w += w
+        return weighted_sum / total_w if total_w else 0.5
+    weight_combo = weighted_perf(combo)
+
+    ml_sig, ml_conf = _ml_predict(signals)
+    if ml_sig:
+        return ml_sig, ml_conf, signals, regime, weight_combo
+
+    up_w = down_w = total = 0
+    for n, s in signals.items():
+        w = 0.0
+        # Average performance of the indicator's current signal across periods & regime
+        w += weighted_perf(((n, s),))
+        if s == "up":
+            up_w += w
+            total += w
+        elif s == "down":
+            down_w += w
+            total += w
+    if total > 0.1:
+        if up_w > down_w * 1.2:
+            return "buy", (up_w / total) * 100, signals, regime, weight_combo
+        if down_w > up_w * 1.2:
+            return "sell", (down_w / total) * 100, signals, regime, weight_combo
+    if all(s == "up" for s in signals.values() if s is not None):
+        avg_conf = weight_combo * 100
+        return "buy", avg_conf, signals, regime, weight_combo
+    if all(s == "down" for s in signals.values() if s is not None):
+        avg_conf = weight_combo * 100
+        return "sell", avg_conf, signals, regime, weight_combo
+    return None, 0.0, signals, regime, weight_combo
+
+
+def backtest_update_multi_period(df, timeframe):
+    now = datetime.utcnow()
+    for period_label, months in BACKTEST_PERIODS.items():
+        bars_needed = months * CONFIG[timeframe]['bars_per_month']
+        if len(df) < bars_needed + 2:
+            continue
+        sub_df = df.tail(bars_needed + 2)
+        regime = _market_regime(sub_df)
+
+        for i in range(50, len(sub_df) - 1):
+            sigs = {n: fn(sub_df, i) for n, fn in INDICATOR_FUNCTIONS.items()}
+            combo = tuple(sorted((k, v) for k, v in sigs.items() if v is not None))
+            p0, p1 = sub_df["close"].iloc[i], sub_df["close"].iloc[i + 1]
+
+            # Determine correctness: If signals are predominantly 'up', expect price increase and vice versa
+            ups = sum(1 for v in sigs.values() if v == "up")
+            downs = sum(1 for v in sigs.values() if v == "down")
+            correct = None
+            if ups > downs:
+                correct = p1 > p0
+            elif downs > ups:
+                correct = p1 < p0
+
+            if correct is None:
+                continue
+            _update_indicator_performance(timeframe, period_label, combo, regime, correct)
+            _add_ml_sample(sigs, p1-p0)
+    _train_ml_model()
+
+# =============================
+# OHLCV fetch and process symbols
+# =============================
+def fetch_latest_ohlcv(symbol, timeframe='6h', limit=750):
     try:
         with exchange_lock:
+            if symbol not in exchange.symbols:
+                print(f"{symbol} not on exchange - skipping")
+                return None
             data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         df.set_index("timestamp", inplace=True)
-        return df.dropna()
+        df.dropna(subset=["close"], inplace=True)
+        return df
     except Exception as e:
-        print(f"{symbol} fetch error: {e}")
+        print(f"Error fetching {symbol}: {e}")
         return None
-
-def detect_signal(df):
-    signals = {}
-    try:
-        idx = -1
-        if df["stoch_k"].iloc[idx] > df["stoch_d"].iloc[idx]:
-            signals["Stoch"] = "up"
-        elif df["stoch_k"].iloc[idx] < df["stoch_d"].iloc[idx]:
-            signals["Stoch"] = "down"
-
-        if df["rsi5"].iloc[idx] > df["rsi13"].iloc[idx] > df["rsi21"].iloc[idx]:
-            signals["RSI"] = "up"
-        elif df["rsi5"].iloc[idx] < df["rsi13"].iloc[idx] < df["rsi21"].iloc[idx]:
-            signals["RSI"] = "down"
-
-        if df["macd"].iloc[idx] > df["macd_signal"].iloc[idx]:
-            signals["MACD"] = "up"
-        elif df["macd"].iloc[idx] < df["macd_signal"].iloc[idx]:
-            signals["MACD"] = "down"
-
-        close = df["close"].iloc[idx]
-        if close > df["bb_upper"].iloc[idx]:
-            signals["Bollinger"] = "down"
-        elif close < df["bb_lower"].iloc[idx]:
-            signals["Bollinger"] = "up"
-    except:
-        pass
-    return signals
-
-def infer_direction(signals):
-    ups = sum(1 for v in signals.values() if v == "up")
-    downs = sum(1 for v in signals.values() if v == "down")
-    conf = (max(ups, downs) / len(signals)) * 100 if signals else 0.0
-    if conf < 55.0: return None, 0.0
-    return ("buy" if ups > downs else "sell"), conf
 
 def process_symbol(symbol, timeframe):
+    print(f"Processing {symbol} for {timeframe} timeframe…")
+    start_time = time.time()
+
     df = fetch_latest_ohlcv(symbol, timeframe=timeframe)
-    if df is None or len(df) < 50:
+    if df is None or len(df) < 100:
+        print(f"{symbol}: insufficient data")
         return None
+
     df = calculate_indicators(df)
-    ind = detect_signal(df)
-    signal, conf = infer_direction(ind)
-    if signal is None:
+    sub_df = df.tail(750)
+    if len(sub_df) > 100:
+        backtest_update_multi_period(sub_df, timeframe)
+
+    sig, conf, states, regime, rating = adaptive_signal(df, timeframe)
+    if sig not in ("buy", "sell") or conf < 55.0:
+        print(f"{symbol}: weak signal ({sig}/{conf:.1f}%), skipping")
         return None
+
     price = df["close"].iloc[-1]
+    leverage = BASE_MAX_LEVERAGE
+    if regime == "high_vol":
+        leverage = int(BASE_MAX_LEVERAGE * 0.5)
+    elif regime == "low_vol":
+        leverage = int(BASE_MAX_LEVERAGE * 1.0)
+
+    # Static example trailing TP and SL, can be made dynamic based on regime or rating here
+    ttp = 3.0 * (1 + rating/100 * 0.5)
+    sl = 1.0 * (1 - rating/150)
+
+    risk_per_unit = price * sl / 100
+    if risk_per_unit == 0:
+        print(f"{symbol}: zero risk per unit")
+        return None
+
+    units = math.floor(MAX_RISK_PER_TRADE_USD / risk_per_unit)
+    if units == 0:
+        print(f"{symbol}: position size too small for risk tolerance")
+        return None
+
+    pos_usd = units * price
+    margin_needed = pos_usd / leverage
+
+    comment = (f"ML conf: {conf:.1f}%, perf rating: {rating:.1f}%, regime: {regime}, "
+               f"{leverage}x lev, TTP {ttp:.2f}%, SL {sl:.2f}%")
+
+    print(f"{symbol} finished in {time.time() - start_time:.1f}s, signal={sig} ({conf:.1f}%), rating={rating:.1f}%")
+
     return {
         "symbol": symbol,
-        "signal": signal,
+        "signal": sig,
         "confidence": conf,
-        "indicator_states": ind,
+        "indicator_states": states,
+        "regime": regime,
         "price": price,
-        "leverage": 10,
-        "ttp_pct": 3.0,
-        "stop_loss_pct": 1.0,
-        "units": 1,
-        "pos_usd": price,
-        "comment": "Multi-indicator alignment detected."
+        "ttp_pct": ttp,
+        "stop_loss_pct": sl,
+        "leverage": leverage,
+        "units": units,
+        "pos_usd": pos_usd,
+        "margin": margin_needed,
+        "comment": comment,
+        "rating": rating,
     }
 
+# =============================
+# Telegram message formatting
+# =============================
 def format_indicator_states(states):
-    return "\n".join(
-        f"  • {k}: {'✅ Up' if v=='up' else '❌ Down' if v=='down' else '⚪ Neutral'}"
-        for k,v in states.items()
-    )
+    return "\n".join(f"  • {name}: {'✅ Up' if s == 'up' else '❌ Down' if s == 'down' else '⚪ Neutral'}"
+                     for name, s in states.items())
 
-def format_signal_detail(res, highlight=False):
+def format_single_signal_detail(res, highlight=False):
     emoji = "🟢 BUY" if res["signal"] == "buy" else "🔴 SELL"
-    if highlight: emoji = "🌟 " + emoji
+    if highlight:
+        emoji = "🌟 " + emoji
+    rating_str = f"• <b>Perf Rating:</b> <code>{res['rating']:.1f}%</code>\n" if "rating" in res and res["rating"] else ""
     return (
         f"<b>{res['symbol']} | {emoji} ({res['confidence']:.1f}%)</b>\n"
-        f"  <b>Price:</b> <code>{res['price']:.2f}</code>\n"
-        f"  <b>TP:</b> <code>{res['ttp_pct']}%</code> | SL: <code>{res['stop_loss_pct']}%</code>\n"
-        f"  <b>Exposure:</b> ${res['pos_usd']:.2f} @ {res['leverage']}x\n"
+        f"  <b>Price:</b> <code>{res['price']:.4f}</code>\n"
+        f"  <b>Leverage:</b> <code>{res['leverage']}x</code>\n"
+        f"  <b>Trailing TP:</b> <code>{res['ttp_pct']:.2f}%</code>\n"
+        f"  <b>Stop Loss:</b> <code>{res['stop_loss_pct']:.2f}%</code>\n"
+        f"  <b>Position:</b> <code>{res['units']} units ≈ ${res['pos_usd']:.2f}</code>\n"
+        f"{rating_str}"
         f"  <i>{res['comment']}</i>\n"
-        f"{format_indicator_states(res['indicator_states'])}\n"
+        f"  <u>Indicators:</u>\n{format_indicator_states(res['indicator_states'])}\n"
     )
 
-def format_summary(results, timestamp, matches, main_tf, compare_tf):
+def format_summary_message_with_cross_tf(signal_results, timestamp_str, matched_symbols, main_tf, compare_tf):
+    if not signal_results:
+        return f"<b>📊 No strong signals on {main_tf.upper()} at {timestamp_str}</b>"
+    sorted_results = sorted(signal_results, key=lambda d: d["confidence"], reverse=True)
+    greeting = ("🌅 Good morning" if 5 <= datetime.utcnow().hour < 12 else
+                "🌞 Good afternoon" if 12 <= datetime.utcnow().hour < 18 else
+                "🌙 Good evening")
+
     header = (
-        f"📊 <b>{main_tf.upper()} Scan @ {timestamp}</b>\n"
+        f"{greeting}, trader!\n"
+        f"<b>📊 {main_tf.upper()} Scan @ {timestamp_str}</b>\n"
         f"<i>Compared against {compare_tf.upper()} timeframe</i>\n"
     )
-    if matches:
-        header += "\n<u>🔁 Confirmed across timeframes:</u>\n"
-        for m in matches:
-            header += f"  • {m} ✅\n"
+    if matched_symbols:
+        header += f"\n<u>🔗 Dual-Timeframe Matches ({len(matched_symbols)}):</u>\n"
+        for sym in matched_symbols:
+            header += f"  • {sym} ✅\n"
 
-    sorted_res = sorted(results, key=lambda x: x["confidence"], reverse=True)
-    body = "<b>⭐ Top Entries:</b>\n" + "".join(
-        format_signal_detail(r, r["symbol"] in matches) for r in sorted_res[:5]
+    details = "<b>⭐ Top Signals:</b>\n" + "".join(
+        format_single_signal_detail(r, highlight=(r["symbol"] in matched_symbols))
+        for r in sorted_results[:5]
     )
-    return header + "\n" + body
+    return header + "\n" + details
 
-# === SCHEDULED TASKS ===
-
-def run_scan_batch(tf):
+# =============================
+# Scheduled scan runner and comparison
+# =============================
+def run_scan(timeframe):
     results = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = {pool.submit(process_symbol, sym, tf): sym for sym in CRYPTO_SYMBOLS}
-        for f in as_completed(futures):
-            res = f.result()
-            if res: results.append(res)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(process_symbol, sym, timeframe): sym for sym in CRYPTO_SYMBOLS}
+        for fut in as_completed(futures):
+            res = fut.result()
+            if res:
+                results.append(res)
     return results
 
 def compare_and_send(main_tf, compare_tf):
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    results_main = run_scan_batch(main_tf)
-    results_comp = run_scan_batch(compare_tf)
-    main_syms = set(r["symbol"] for r in sorted(results_main, key=lambda x: x["confidence"], reverse=True)[:5])
-    comp_syms = set(r["symbol"] for r in sorted(results_comp, key=lambda x: x["confidence"], reverse=True)[:5])
-    matches = main_syms & comp_syms
-    msg = format_summary(results_main, timestamp, matches, main_tf, compare_tf)
-    send_telegram_message(msg)
+    main_results = run_scan(main_tf)
+    compare_results = run_scan(compare_tf)
 
-def schedule_job_00():
+    top_main_syms = set(r["symbol"] for r in sorted(main_results, key=lambda x: x["confidence"], reverse=True)[:5])
+    top_compare_syms = set(r["symbol"] for r in sorted(compare_results, key=lambda x: x["confidence"], reverse=True)[:5])
+    matched = top_main_syms & top_compare_syms
+
+    message = format_summary_message_with_cross_tf(main_results, timestamp, matched, main_tf, compare_tf)
+    send_telegram_message(message)
+
+# =============================
+# Jobs at scheduled UTC times
+# =============================
+def job_0000():
     compare_and_send("8h", "6h")
 
-def schedule_job_08():
+def job_0800():
     compare_and_send("8h", "6h")
 
-def schedule_job_18():
+def job_1800():
     compare_and_send("8h", "6h")
 
-# === MAIN LOOP ===
-
+# =============================
+# Main Loop
+# =============================
 def main():
     start_webserver()
-    schedule.every().day.at("00:00").do(schedule_job_00)
-    schedule.every().day.at("08:00").do(schedule_job_08)
-    schedule.every().day.at("18:00").do(schedule_job_18)
-    print("⏳ Scheduler active. Waiting...")
+
+    schedule.every().day.at("00:00").do(job_0000)
+    schedule.every().day.at("08:00").do(job_0800)
+    schedule.every().day.at("18:00").do(job_1800)
+
+    print("⏳ Scheduler started. Waiting for scheduled scans at 00:00, 08:00, and 18:00 UTC.")
 
     try:
         while True:
             schedule.run_pending()
-            time.sleep(20)
+            time.sleep(15)
     except KeyboardInterrupt:
-        print("\n🛑 Interrupted by user. Goodbye!")
+        print("\n🛑 Interrupted by user. Exiting...")
 
 if __name__ == "__main__":
     main()
